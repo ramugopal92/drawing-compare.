@@ -18,6 +18,7 @@ rest of the pipeline automatically falls back to OCR + pixel diffing only.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,6 +54,99 @@ class PageData:
 
     def has_vector_content(self, min_primitives: int = 20) -> bool:
         return len(self.vector_primitives) >= min_primitives
+
+
+@dataclass
+class PageSummary:
+    """
+    Lightweight description of a page, used to decide *which* pages to
+    compare before paying to rasterize any of them.
+
+    Scanning a 40-sheet set this way costs text extraction only — no
+    300-DPI pixmaps, no OpenCV — which is what makes multi-page matching
+    affordable.
+    """
+
+    page_number: int  # 0-based
+    page_size_pt: tuple[float, float]
+    # Raw text is kept alongside tokens because sheet-number regexes need
+    # single characters ("SHEET 1 OF 3") that the tokenizer deliberately
+    # discards as noise for similarity scoring.
+    text: str = ""
+    title_block_text: str = ""
+    text_tokens: list[str] = field(default_factory=list)
+    body_tokens: list[str] = field(default_factory=list)
+    title_block_tokens: list[str] = field(default_factory=list)
+    vector_primitive_count: int = 0
+
+    def has_vector_content(self, min_primitives: int = 20) -> bool:
+        return self.vector_primitive_count >= min_primitives
+
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9.\-_/]+")
+
+# Title block is conventionally the bottom-right corner of the sheet.
+TITLE_BLOCK_FRACTION_X = 0.65  # left edge of the region, as a fraction of width
+TITLE_BLOCK_FRACTION_Y = 0.70  # top edge of the region, as a fraction of height
+
+
+def tokenize(text: str) -> list[str]:
+    """Uppercased tokens of length > 1 — shared by matching and scanning."""
+    return [t for t in _TOKEN_RE.findall(text.upper()) if len(t) > 1]
+
+
+def scan_pdf_pages(pdf_path: str | Path) -> list[PageSummary]:
+    """
+    Read every page's text and vector-density without rasterizing.
+
+    Returns one PageSummary per page, in document order.
+    """
+    pdf_path = Path(pdf_path)
+    summaries: list[PageSummary] = []
+    with fitz.open(pdf_path) as doc:
+        for index, page in enumerate(doc):
+            width, height = page.rect.width, page.rect.height
+            spans = _extract_text_spans(page)
+
+            tokens: list[str] = []
+            body_tokens: list[str] = []
+            tb_tokens: list[str] = []
+            text_parts: list[str] = []
+            tb_parts: list[str] = []
+            tb_x = width * TITLE_BLOCK_FRACTION_X
+            tb_y = height * TITLE_BLOCK_FRACTION_Y
+            for span in spans:
+                span_tokens = tokenize(span.text)
+                tokens.extend(span_tokens)
+                text_parts.append(span.text)
+                x0, y0, _, _ = span.bbox
+                if x0 >= tb_x and y0 >= tb_y:
+                    tb_tokens.extend(span_tokens)
+                    tb_parts.append(span.text)
+                else:
+                    # Body tokens only, for similarity scoring: title blocks
+                    # are nearly identical across every sheet in a set, so
+                    # including them makes unrelated sheets look alike.
+                    body_tokens.extend(span_tokens)
+
+            try:
+                vector_count = sum(len(p.get("items", [])) for p in page.get_drawings())
+            except Exception:
+                vector_count = 0
+
+            summaries.append(
+                PageSummary(
+                    page_number=index,
+                    page_size_pt=(width, height),
+                    text=" ".join(text_parts),
+                    title_block_text=" ".join(tb_parts),
+                    text_tokens=tokens,
+                    body_tokens=body_tokens,
+                    title_block_tokens=tb_tokens,
+                    vector_primitive_count=vector_count,
+                )
+            )
+    return summaries
 
 
 def load_pdf_page(pdf_path: str | Path, page_index: int = 0) -> PageData:

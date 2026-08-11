@@ -3,7 +3,7 @@ PyMuPDF>=1.24.0        # a.k.a. "fitz" - reads PDF vector content + renders page
 pdfplumber>=0.11.0     # secondary text/line extraction, used as a cross-check
 
 # Image processing / alignment
- opencv-python-headless>=4.9.0
+opencv-python>=4.9.0
 numpy>=1.26.0
 Pillow>=10.3.0
 
