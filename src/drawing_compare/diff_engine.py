@@ -31,13 +31,18 @@ from .config import (
     GEOMETRY_MATCH_TOLERANCE_PT,
     GEOMETRY_MIN_CLUSTER_PRIMITIVES,
     GEOMETRY_MAX_CLUSTER_DENSITY,
+    TEXT_MASK_PADDING_PT,
     REPORT_LINE_WEIGHT_CHANGES,
     TEXT_PAIR_MAX_DISTANCE_PT,
     TEXT_FUZZY_MATCH_THRESHOLD,
     TEXT_POSITION_TOLERANCE_PT,
 )
 from .pdf_io import PageData, TextSpan, VectorPrimitive
-from .zones import zone_label_for_bbox
+from .zones import (
+    detect_zone_grid,
+    zone_label_for_bbox,
+    zone_label_for_bbox_with_grid,
+)
 
 
 class ChangeType(str, Enum):
@@ -236,6 +241,42 @@ def _union_bbox(bboxes):
     )
 
 
+def _build_text_mask(text_spans: list[TextSpan], cell: float = 24.0) -> dict:
+    """Grid index of text bounding boxes, for fast containment tests."""
+    index: dict[tuple, list[tuple]] = {}
+    pad = TEXT_MASK_PADDING_PT
+    for span in text_spans:
+        x0, y0, x1, y1 = span.bbox
+        box = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+        for gx in range(int(box[0] // cell), int(box[2] // cell) + 1):
+            for gy in range(int(box[1] // cell), int(box[3] // cell) + 1):
+                index.setdefault((gx, gy), []).append(box)
+    return {"cell": cell, "index": index}
+
+
+def _inside_text(bbox, mask: dict) -> bool:
+    """True if this primitive lies entirely within some text bounding box.
+
+    Certain CAD exports render text as filled vector outlines rather than
+    as font glyphs. Those outlines land in get_drawings() as hundreds of
+    tiny paths, so rewording one note reads as a large geometry change.
+    Anything wholly contained in a text box is lettering, not drawing
+    geometry, and belongs to the text diff instead.
+    """
+    cell = mask["cell"]
+    index = mask["index"]
+    gx, gy = int(bbox[0] // cell), int(bbox[1] // cell)
+    for box in index.get((gx, gy), ()):
+        if (
+            bbox[0] >= box[0]
+            and bbox[1] >= box[1]
+            and bbox[2] <= box[2]
+            and bbox[3] <= box[3]
+        ):
+            return True
+    return False
+
+
 def diff_geometry(
     old_page: PageData,
     new_page: PageData,
@@ -251,7 +292,10 @@ def diff_geometry(
       - line-weight-only differences are collapsed into one note per sheet
         unless REPORT_LINE_WEIGHT_CHANGES is enabled
     """
-    old_prims = old_page.vector_primitives
+    old_mask = _build_text_mask(old_page.text_spans)
+    new_mask = _build_text_mask(new_page.text_spans)
+
+    old_prims = [p for p in old_page.vector_primitives if not _inside_text(p.bbox, old_mask)]
     new_prims = [
         VectorPrimitive(
             kind=p.kind,
@@ -259,6 +303,7 @@ def diff_geometry(
             stroke_width=p.stroke_width,
         )
         for p in new_page.vector_primitives
+        if not _inside_text(p.bbox, new_mask)
     ]
 
     pairs, unmatched_old, unmatched_new = _match_primitives(old_prims, new_prims)

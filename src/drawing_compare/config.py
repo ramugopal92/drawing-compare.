@@ -16,12 +16,26 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ZoneGridConfig:
-    columns: int = 8          # numbered, typically right-to-left on the sheet
+    columns: int = 4          # numbered, typically right-to-left on the sheet
     rows: str = "ABCD"        # lettered, top-to-bottom
     columns_right_to_left: bool = True
 
 
+# Default grid. Overridden per sheet by zones.detect_zone_grid() when the
+# border reference characters can be read off the sheet edges, so a set
+# that uses a different standard is handled without editing this file.
 ZONE_GRID = ZoneGridConfig()
+
+# Zone detection: how far into the sheet (as a fraction of width/height) to
+# look for the border reference characters printed along the edges.
+ZONE_BORDER_MARGIN = 0.06
+
+# Geometry diff: primitives lying inside a text bounding box are glyph
+# outlines, not drawing geometry. Some CAD exports emit certain fonts as
+# filled vector paths, which otherwise floods the geometry diff with
+# hundreds of "changes" every time a note is reworded. Text bounding boxes
+# are inflated by this many points before the test.
+TEXT_MASK_PADDING_PT = 1.5
 
 # Rendering resolution when we rasterize a PDF page (for OCR fallback,
 # alignment feature matching, and the overlay report image).
