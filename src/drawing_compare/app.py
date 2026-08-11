@@ -26,6 +26,7 @@ import streamlit as st
 from drawing_compare.page_matcher import match_pages
 from drawing_compare.pdf_io import scan_pdf_pages
 from drawing_compare.pipeline import compare_documents
+from drawing_compare.classify import classify_records
 from drawing_compare.report import records_to_dicts
 
 st.set_page_config(page_title="Drawing Compare", layout="wide")
@@ -141,15 +142,42 @@ progress_bar.empty()
 # ---------------------------------------------------------------- summary
 st.subheader(f"{doc.total_records} difference(s) across {len(doc.plan.matched)} sheet(s)")
 
-summary = doc.summary()
-if summary:
+sev = doc.severity_summary()
+if sev:
+    order = ["Critical", "Major", "Minor", "Info"]
+    cols = st.columns(len(order))
+    for col, name in zip(cols, order):
+        col.metric(name, sev.get(name, 0))
+
+critical = doc.critical_changes()
+if critical:
+    st.subheader("Critical changes — what gets made or bought")
     st.dataframe(
         pd.DataFrame(
-            {"Change type": list(summary.keys()), "Count": list(summary.values())}
+            [
+                {
+                    "Sheet": label.split("—")[0].strip(),
+                    "Zone": c.zone,
+                    "Category": c.category.value,
+                    "Change": c.describe(),
+                }
+                for label, c in critical
+            ]
         ),
         hide_index=True,
         use_container_width=True,
     )
+
+with st.expander("All changes by type"):
+    summary = doc.summary()
+    if summary:
+        st.dataframe(
+            pd.DataFrame(
+                {"Change type": list(summary.keys()), "Count": list(summary.values())}
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
 
 unreliable = doc.unreliable_pages()
 if unreliable:
@@ -200,11 +228,20 @@ else:
                 use_container_width=True,
             )
 
-            st.markdown("**Difference list**")
-            df = pd.DataFrame(records_to_dicts(result.records))
-            if not df.empty:
-                df = df[["zone", "change_type", "old_value", "new_value", "confidence"]]
-                df.columns = ["Zone", "Type", "Old Value", "New Value", "Confidence"]
+            st.markdown("**Difference list — most significant first**")
+            classified = classify_records(result.records)
+            df = pd.DataFrame(
+                [
+                    {
+                        "Severity": c.severity.value,
+                        "Category": c.category.value,
+                        "Zone": c.zone,
+                        "Old Value": c.record.old_value,
+                        "New Value": c.record.new_value,
+                    }
+                    for c in classified
+                ]
+            )
             st.dataframe(df, hide_index=True, use_container_width=True)
 
 # --------------------------------------------------------------- downloads

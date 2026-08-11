@@ -26,6 +26,7 @@ import numpy as np
 
 from .alignment import AlignmentResult, compute_alignment
 from .diff_engine import DiffRecord, diff_pages
+from .classify import classify_records, summarize_by_severity
 from .page_matcher import MatchPlan, PagePair, match_pages
 from .pdf_io import PageData, load_pdf_page, scan_pdf_pages
 from .report import (
@@ -158,6 +159,22 @@ class DocumentCompareResult:
             for change_type, count in page.result.summary().items():
                 counts[change_type] = counts.get(change_type, 0) + count
         return counts
+
+    def severity_summary(self) -> dict[str, int]:
+        """Change counts by engineering severity across the whole set."""
+        records = [r for p in self.pages if p.result for r in p.result.records]
+        return {k.value: v for k, v in summarize_by_severity(classify_records(records)).items()}
+
+    def critical_changes(self):
+        """The changes that alter what gets made or bought."""
+        out = []
+        for page in self.pages:
+            if not page.result:
+                continue
+            for c in classify_records(page.result.records):
+                if c.severity.value == "Critical":
+                    out.append((page.pair.label(), c))
+        return out
 
     def unreliable_pages(self) -> list[PageComparison]:
         return [

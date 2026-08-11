@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from .alignment import pdf_points_to_pixels
+from .classify import Severity, classify_records, summarize_by_severity
 from .config import MAX_REPORT_ROWS_PER_SHEET
 from .diff_engine import ChangeType, DiffRecord
 
@@ -216,18 +217,50 @@ def _summary_counts(records: list[DiffRecord]) -> dict[str, int]:
     return counts
 
 
+_SEVERITY_HEX = {
+    Severity.CRITICAL: "#A32D2D",
+    Severity.MAJOR: "#BA7517",
+    Severity.MINOR: "#185FA5",
+    Severity.INFORMATIONAL: "#5F5E5A",
+}
+
+
 def _diff_table_html(records: list[DiffRecord]) -> str:
-    shown = records[:MAX_REPORT_ROWS_PER_SHEET]
-    truncated = len(records) - len(shown)
+    """
+    Difference table, ordered by engineering severity rather than by
+    detection order.
+
+    A flat list forces the reader to work out for themselves that a
+    fastener material change matters more than a copyright year. Sorting
+    by severity and labelling the category means they can stop reading
+    once the criticals are handled.
+    """
+    classified = classify_records(records)
+    shown = classified[:MAX_REPORT_ROWS_PER_SHEET]
+    truncated = len(classified) - len(shown)
     rows = []
-    for i, rec in enumerate(shown, start=1):
+    last_severity = None
+    index = 0
+    for change in shown:
+        if change.severity is not last_severity:
+            last_severity = change.severity
+            colour = _SEVERITY_HEX[change.severity]
+            count = sum(1 for c in classified if c.severity is change.severity)
+            rows.append(
+                f'<tr><td colspan="6" style="background:#f4f4f4;font-weight:600;'
+                f'border-left:4px solid {colour}">{change.severity.value} '
+                f"— {count} change(s)</td></tr>"
+            )
+        index += 1
+        rec = change.record
         color = _ROW_COLORS_HEX.get(rec.change_type, "#999")
         rows.append(
             "<tr>"
-            f"<td>{i}</td>"
+            f"<td>{index}</td>"
             f"<td>{rec.zone}</td>"
             f'<td><span class="swatch" style="background:{color}"></span>'
-            f"{rec.change_type.value}</td>"
+            f"{change.category.value}<br><small style='color:#777'>"
+            f"{_escape(rec.change_type.value)}</small></td>"
             f"<td>{_escape(rec.old_value)}</td>"
             f"<td>{_escape(rec.new_value)}</td>"
             f"<td>{rec.confidence:.2f}</td>"
@@ -246,7 +279,7 @@ def _diff_table_html(records: list[DiffRecord]) -> str:
     )
     return (
         note
-        + "<table><thead><tr><th>#</th><th>Zone</th><th>Type</th><th>Old Value</th>"
+        + "<table><thead><tr><th>#</th><th>Zone</th><th>Category</th><th>Old Value</th>"
         "<th>New Value</th><th>Confidence</th></tr></thead><tbody>"
         + "\n".join(rows)
         + "</tbody></table>"
