@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from .alignment import pdf_points_to_pixels
+from .config import MAX_REPORT_ROWS_PER_SHEET
 from .diff_engine import ChangeType, DiffRecord
 
 _COLORS = {
@@ -216,8 +217,10 @@ def _summary_counts(records: list[DiffRecord]) -> dict[str, int]:
 
 
 def _diff_table_html(records: list[DiffRecord]) -> str:
+    shown = records[:MAX_REPORT_ROWS_PER_SHEET]
+    truncated = len(records) - len(shown)
     rows = []
-    for i, rec in enumerate(records, start=1):
+    for i, rec in enumerate(shown, start=1):
         color = _ROW_COLORS_HEX.get(rec.change_type, "#999")
         rows.append(
             "<tr>"
@@ -232,8 +235,18 @@ def _diff_table_html(records: list[DiffRecord]) -> str:
         )
     if not rows:
         return ""
+    note = (
+        f'<div class="warn">Showing the first {len(shown)} of {len(records)} '
+        f"differences on this sheet. {truncated} more are in the JSON export. "
+        "A list this long usually means alignment drifted or the two sheets "
+        "are not the same drawing — check the overlay before working through "
+        "it.</div>"
+        if truncated > 0
+        else ""
+    )
     return (
-        "<table><thead><tr><th>#</th><th>Zone</th><th>Type</th><th>Old Value</th>"
+        note
+        + "<table><thead><tr><th>#</th><th>Zone</th><th>Type</th><th>Old Value</th>"
         "<th>New Value</th><th>Confidence</th></tr></thead><tbody>"
         + "\n".join(rows)
         + "</tbody></table>"

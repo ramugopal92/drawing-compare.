@@ -26,7 +26,7 @@ import fitz  # PyMuPDF
 import numpy as np
 from PIL import Image
 
-from .config import RENDER_DPI
+from .config import MAX_RASTER_PIXELS, MIN_RENDER_DPI, RENDER_DPI
 
 
 @dataclass
@@ -166,15 +166,17 @@ def load_pdf_page(pdf_path: str | Path, page_index: int = 0) -> PageData:
 
     text_spans = _extract_text_spans(page)
     vector_primitives = _extract_vector_primitives(page)
-    raster_image = _rasterize_page(page, dpi=RENDER_DPI)
+    page_size = (page.rect.width, page.rect.height)
+    dpi = effective_dpi(page_size)
+    raster_image = _rasterize_page(page, dpi=dpi)
 
     return PageData(
         page_number=page_index,
-        page_size_pt=(page.rect.width, page.rect.height),
+        page_size_pt=page_size,
         text_spans=text_spans,
         vector_primitives=vector_primitives,
         raster_image=raster_image,
-        render_dpi=RENDER_DPI,
+        render_dpi=dpi,
     )
 
 
@@ -255,6 +257,20 @@ def _bbox_from_item(item) -> tuple[float, float, float, float] | None:
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
     return (min(xs), min(ys), max(xs), max(ys))
+
+
+def effective_dpi(page_size_pt: tuple[float, float], dpi: int = RENDER_DPI) -> int:
+    """
+    Reduce DPI for large sheets so the raster stays under MAX_RASTER_PIXELS.
+
+    Returns the requested DPI unchanged for normal-sized sheets.
+    """
+    width_pt, height_pt = page_size_pt
+    pixels = (width_pt / 72.0 * dpi) * (height_pt / 72.0 * dpi)
+    if pixels <= MAX_RASTER_PIXELS:
+        return dpi
+    scale = (MAX_RASTER_PIXELS / pixels) ** 0.5
+    return max(MIN_RENDER_DPI, int(dpi * scale))
 
 
 def _rasterize_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> np.ndarray:
