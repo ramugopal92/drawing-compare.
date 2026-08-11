@@ -25,9 +25,14 @@ from rapidfuzz import fuzz
 
 from .alignment import AlignmentResult, transform_bbox
 from .config import (
+    CLUSTER_PAIR_COUNT_RATIO,
+    CLUSTER_PAIR_MAX_DISTANCE_PT,
     GEOMETRY_CLUSTER_GAP_PT,
     GEOMETRY_MATCH_TOLERANCE_PT,
     GEOMETRY_MIN_CLUSTER_PRIMITIVES,
+    GEOMETRY_MAX_CLUSTER_DENSITY,
+    REPORT_LINE_WEIGHT_CHANGES,
+    TEXT_PAIR_MAX_DISTANCE_PT,
     TEXT_FUZZY_MATCH_THRESHOLD,
     TEXT_POSITION_TOLERANCE_PT,
 )
@@ -239,9 +244,12 @@ def diff_geometry(
     """
     Compare vector geometry between two pages.
 
-    Unmatched primitives are clustered into engineering-level changes
-    before being reported: one row per edit, annotated with how many
-    primitives it covers, rather than one row per line segment.
+    Reports engineering-level changes, not primitive-level ones:
+      - unmatched primitives are clustered by proximity
+      - a removed cluster sitting next to an added cluster of similar size
+        is one feature that was edited, reported as a single row
+      - line-weight-only differences are collapsed into one note per sheet
+        unless REPORT_LINE_WEIGHT_CHANGES is enabled
     """
     old_prims = old_page.vector_primitives
     new_prims = [
@@ -257,35 +265,152 @@ def diff_geometry(
     page_size = old_page.page_size_pt
     records: list[DiffRecord] = []
 
+    weight_changes: list[tuple[VectorPrimitive, VectorPrimitive]] = []
     for i, j in pairs:
         op, np_ = old_prims[i], new_prims[j]
         if abs(np_.stroke_width - op.stroke_width) > 0.25:
+            weight_changes.append((op, np_))
+
+    if weight_changes:
+        if REPORT_LINE_WEIGHT_CHANGES:
+            for op, np_ in weight_changes:
+                records.append(
+                    DiffRecord(
+                        zone=zone_label_for_bbox(op.bbox, *page_size),
+                        change_type=ChangeType.GEOMETRY_CHANGED,
+                        bbox=op.bbox,
+                        old_value=f"line weight {op.stroke_width:.2f}",
+                        new_value=f"line weight {np_.stroke_width:.2f}",
+                    )
+                )
+        else:
+            boxes = [op.bbox for op, _ in weight_changes]
+            transitions: dict[tuple[str, str], int] = {}
+            for op, np_ in weight_changes:
+                key = (f"{op.stroke_width:.2f}", f"{np_.stroke_width:.2f}")
+                transitions[key] = transitions.get(key, 0) + 1
+            detail = "; ".join(
+                f"{a} to {b} on {n} primitives"
+                for (a, b), n in sorted(transitions.items(), key=lambda kv: -kv[1])
+            )
             records.append(
                 DiffRecord(
-                    zone=zone_label_for_bbox(op.bbox, *page_size),
+                    zone="sheet",
                     change_type=ChangeType.GEOMETRY_CHANGED,
-                    bbox=op.bbox,
-                    old_value=f"line weight {op.stroke_width:.2f}",
-                    new_value=f"line weight {np_.stroke_width:.2f}",
-                    confidence=_bbox_iou(op.bbox, np_.bbox),
+                    bbox=_union_bbox(boxes),
+                    old_value="line weights differ",
+                    new_value=f"{len(weight_changes)} primitives ({detail})",
+                    confidence=0.3,
                 )
             )
 
-    records.extend(
-        _cluster_records(
-            [old_prims[i] for i in unmatched_old],
-            ChangeType.GEOMETRY_REMOVED,
-            page_size,
+    removed = _build_clusters([old_prims[i] for i in unmatched_old])
+    added = _build_clusters([new_prims[j] for j in unmatched_new])
+    paired, removed_only, added_only = _pair_clusters(removed, added)
+
+    for r, a in paired:
+        offset = _bbox_center_distance(r["bbox"], a["bbox"])
+        moved = f", shifted {offset:.0f} pt" if offset >= 1.0 else ""
+        records.append(
+            DiffRecord(
+                zone=zone_label_for_bbox(r["bbox"], *page_size),
+                change_type=ChangeType.GEOMETRY_CHANGED,
+                bbox=_union_bbox([r["bbox"], a["bbox"]]),
+                old_value=f"{r['summary']} ({r['size']})",
+                new_value=f"{a['summary']} ({a['size']}){moved}",
+            )
         )
-    )
-    records.extend(
-        _cluster_records(
-            [new_prims[j] for j in unmatched_new],
-            ChangeType.GEOMETRY_ADDED,
-            page_size,
+
+    for c in removed_only:
+        records.append(
+            DiffRecord(
+                zone=zone_label_for_bbox(c["bbox"], *page_size),
+                change_type=ChangeType.GEOMETRY_REMOVED,
+                bbox=c["bbox"],
+                old_value=f"{c['summary']} ({c['size']})",
+            )
         )
-    )
+    for c in added_only:
+        records.append(
+            DiffRecord(
+                zone=zone_label_for_bbox(c["bbox"], *page_size),
+                change_type=ChangeType.GEOMETRY_ADDED,
+                bbox=c["bbox"],
+                new_value=f"{c['summary']} ({c['size']})",
+            )
+        )
     return records
+
+
+def _build_clusters(prims: list[VectorPrimitive]) -> list[dict]:
+    """Group unmatched primitives into clusters described in plain terms."""
+    if not prims:
+        return []
+    clusters: list[dict] = []
+    for group in _cluster_bboxes([p.bbox for p in prims], GEOMETRY_CLUSTER_GAP_PT):
+        if len(group) < GEOMETRY_MIN_CLUSTER_PRIMITIVES:
+            continue
+        bbox = _union_bbox([prims[i].bbox for i in group])
+        area = max(bbox[2] - bbox[0], 1.0) * max(bbox[3] - bbox[1], 1.0)
+        if len(group) / area > GEOMETRY_MAX_CLUSTER_DENSITY:
+            continue
+        kinds: dict[str, int] = {}
+        for i in group:
+            kinds[prims[i].kind] = kinds.get(prims[i].kind, 0) + 1
+        summary = ", ".join(
+            f"{n} {k}{'s' if n > 1 else ''}"
+            for k, n in sorted(kinds.items(), key=lambda kv: -kv[1])
+        )
+        clusters.append(
+            {
+                "bbox": bbox,
+                "count": len(group),
+                "summary": summary,
+                "size": f"{bbox[2] - bbox[0]:.0f} x {bbox[3] - bbox[1]:.0f} pt",
+            }
+        )
+    return clusters
+
+
+def _pair_clusters(
+    removed: list[dict], added: list[dict]
+) -> tuple[list[tuple[dict, dict]], list[dict], list[dict]]:
+    """
+    Match removed clusters to added clusters that are probably the same
+    feature edited in place.
+
+    Without this, moving one bracket produces "26 lines removed in D6" and
+    "26 lines added in D6" as two unrelated rows, and the engineer has to
+    work out for themselves that they are the same edit. Candidates are
+    scored by centre distance and accepted closest-first, provided their
+    primitive counts are comparable.
+    """
+    candidates: list[tuple[float, int, int]] = []
+    for i, r in enumerate(removed):
+        for j, a in enumerate(added):
+            dist = _bbox_center_distance(r["bbox"], a["bbox"])
+            if dist > CLUSTER_PAIR_MAX_DISTANCE_PT:
+                continue
+            lo, hi = sorted((r["count"], a["count"]))
+            if hi == 0 or lo / hi < CLUSTER_PAIR_COUNT_RATIO:
+                continue
+            candidates.append((dist, i, j))
+
+    used_r: set[int] = set()
+    used_a: set[int] = set()
+    paired: list[tuple[dict, dict]] = []
+    for _, i, j in sorted(candidates, key=lambda t: t[0]):
+        if i in used_r or j in used_a:
+            continue
+        used_r.add(i)
+        used_a.add(j)
+        paired.append((removed[i], added[j]))
+
+    return (
+        paired,
+        [c for i, c in enumerate(removed) if i not in used_r],
+        [c for j, c in enumerate(added) if j not in used_a],
+    )
 
 
 def _cluster_records(
@@ -329,72 +454,194 @@ def _cluster_records(
     return records
 
 
+def _group_spans_into_lines(spans: list[TextSpan]) -> list[TextSpan]:
+    """
+    Merge word-level spans into whole text lines.
+
+    Diffing individual words is what produced the cascade failure: insert
+    one word into a note and every following word shifts position, so each
+    one is reported as changed. "SEE 322451" becoming "SEE DRAWING 322451"
+    generated ten rows of nonsense (322451 -> DRAWING, FOR -> 322451, ...).
+    At line level it is one row that reads the way an engineer would
+    describe it.
+
+    Spans are grouped when they share a baseline (within half the font
+    height) and sit close enough horizontally to be the same line of text.
+    """
+    if not spans:
+        return []
+
+    ordered = sorted(spans, key=lambda s: (round(s.bbox[1], 1), s.bbox[0]))
+    lines: list[list[TextSpan]] = []
+    current: list[TextSpan] = [ordered[0]]
+
+    for span in ordered[1:]:
+        prev = current[-1]
+        height = max(prev.bbox[3] - prev.bbox[1], 1.0)
+        same_baseline = abs(span.bbox[1] - prev.bbox[1]) <= height * 0.6
+        gap = span.bbox[0] - prev.bbox[2]
+        adjacent = -height <= gap <= height * 2.5
+        if same_baseline and adjacent:
+            current.append(span)
+        else:
+            lines.append(current)
+            current = [span]
+    lines.append(current)
+
+    merged: list[TextSpan] = []
+    for group in lines:
+        text = " ".join(s.text for s in group).strip()
+        if not text:
+            continue
+        merged.append(
+            TextSpan(
+                text=text,
+                bbox=_union_bbox([s.bbox for s in group]),
+                font_size=max(s.font_size for s in group),
+            )
+        )
+    return merged
+
+
 def diff_text(
     old_page: PageData,
     new_page: PageData,
     alignment: AlignmentResult,
 ) -> list[DiffRecord]:
-    old_spans = old_page.text_spans
-    new_spans = [
-        TextSpan(
-            text=s.text,
-            bbox=_aligned_bbox(s.bbox, alignment, old_page.render_dpi),
-            font_size=s.font_size,
-        )
-        for s in new_page.text_spans
-    ]
+    """
+    Compare text between two pages, one row per changed line.
 
-    matched_new_idx: set[int] = set()
+    Lines are matched by position first, then by content among anything
+    left over — so a note that moved down the sheet is reported as one
+    change rather than as a deletion plus an unrelated addition.
+    """
+    old_lines = _group_spans_into_lines(old_page.text_spans)
+    new_lines = _group_spans_into_lines(
+        [
+            TextSpan(
+                text=s.text,
+                bbox=_aligned_bbox(s.bbox, alignment, old_page.render_dpi),
+                font_size=s.font_size,
+            )
+            for s in new_page.text_spans
+        ]
+    )
+
+    page_size = old_page.page_size_pt
     records: list[DiffRecord] = []
+    used_new: set[int] = set()
+    matched_old: set[int] = set()
 
-    for old_s in old_spans:
-        best_idx, best_dist = -1, float("inf")
-        for i, new_s in enumerate(new_spans):
-            if i in matched_new_idx:
+    identical: dict[str, list[int]] = {}
+    for i, line in enumerate(new_lines):
+        identical.setdefault(line.text, []).append(i)
+
+    for i, old_line in enumerate(old_lines):
+        for j in identical.get(old_line.text, []):
+            if j in used_new:
                 continue
-            dist = _bbox_center_distance(old_s.bbox, new_s.bbox)
-            if dist < best_dist:
-                best_idx, best_dist = i, dist
+            if _bbox_center_distance(old_line.bbox, new_lines[j].bbox) <= TEXT_POSITION_TOLERANCE_PT:
+                used_new.add(j)
+                matched_old.add(i)
+                break
 
-        if best_idx == -1 or best_dist > TEXT_POSITION_TOLERANCE_PT:
-            records.append(
-                DiffRecord(
-                    zone=zone_label_for_bbox(old_s.bbox, *old_page.page_size_pt),
-                    change_type=ChangeType.TEXT_REMOVED,
-                    bbox=old_s.bbox,
-                    old_value=old_s.text,
-                    new_value=None,
-                )
-            )
+    for i, old_line in enumerate(old_lines):
+        if i in matched_old:
             continue
-
-        matched_new_idx.add(best_idx)
-        new_s = new_spans[best_idx]
-        similarity = fuzz.ratio(old_s.text, new_s.text)
-        if similarity < TEXT_FUZZY_MATCH_THRESHOLD:
-            records.append(
-                DiffRecord(
-                    zone=zone_label_for_bbox(old_s.bbox, *old_page.page_size_pt),
-                    change_type=ChangeType.TEXT_CHANGED,
-                    bbox=old_s.bbox,
-                    old_value=old_s.text,
-                    new_value=new_s.text,
-                    confidence=similarity / 100.0,
+        best_j, best_score = -1, 0.0
+        for j, new_line in enumerate(new_lines):
+            if j in used_new:
+                continue
+            if _bbox_center_distance(old_line.bbox, new_line.bbox) > TEXT_POSITION_TOLERANCE_PT:
+                continue
+            score = fuzz.ratio(old_line.text, new_line.text)
+            if score > best_score:
+                best_j, best_score = j, score
+        if best_j >= 0:
+            used_new.add(best_j)
+            matched_old.add(i)
+            if best_score < TEXT_FUZZY_MATCH_THRESHOLD:
+                records.append(
+                    DiffRecord(
+                        zone=zone_label_for_bbox(old_line.bbox, *page_size),
+                        change_type=ChangeType.TEXT_CHANGED,
+                        bbox=old_line.bbox,
+                        old_value=old_line.text,
+                        new_value=new_lines[best_j].text,
+                        confidence=best_score / 100.0,
+                    )
                 )
-            )
 
-    for i, new_s in enumerate(new_spans):
-        if i in matched_new_idx:
+    for i, old_line in enumerate(old_lines):
+        if i in matched_old:
             continue
+        best_j, best_score = -1, 0.0
+        for j, new_line in enumerate(new_lines):
+            if j in used_new:
+                continue
+            score = fuzz.ratio(old_line.text, new_line.text)
+            if score > best_score:
+                best_j, best_score = j, score
+        if best_j >= 0 and best_score >= TEXT_FUZZY_MATCH_THRESHOLD:
+            used_new.add(best_j)
+            matched_old.add(i)
+            moved = _bbox_center_distance(old_line.bbox, new_lines[best_j].bbox)
+            if moved > TEXT_POSITION_TOLERANCE_PT:
+                records.append(
+                    DiffRecord(
+                        zone=zone_label_for_bbox(old_line.bbox, *page_size),
+                        change_type=ChangeType.TEXT_CHANGED,
+                        bbox=old_line.bbox,
+                        old_value=old_line.text,
+                        new_value=f"{new_lines[best_j].text} (moved {moved:.0f} pt)",
+                        confidence=best_score / 100.0,
+                    )
+                )
+
+    leftover_old = [i for i in range(len(old_lines)) if i not in matched_old]
+    leftover_new = [j for j in range(len(new_lines)) if j not in used_new]
+    candidates = []
+    for i in leftover_old:
+        for j in leftover_new:
+            d = _bbox_center_distance(old_lines[i].bbox, new_lines[j].bbox)
+            if d <= TEXT_PAIR_MAX_DISTANCE_PT:
+                candidates.append((d, i, j))
+    for _, i, j in sorted(candidates, key=lambda t: t[0]):
+        if i in matched_old or j in used_new:
+            continue
+        matched_old.add(i)
+        used_new.add(j)
         records.append(
             DiffRecord(
-                zone=zone_label_for_bbox(new_s.bbox, *old_page.page_size_pt),
-                change_type=ChangeType.TEXT_ADDED,
-                bbox=new_s.bbox,
-                old_value=None,
-                new_value=new_s.text,
+                zone=zone_label_for_bbox(old_lines[i].bbox, *page_size),
+                change_type=ChangeType.TEXT_CHANGED,
+                bbox=old_lines[i].bbox,
+                old_value=old_lines[i].text,
+                new_value=new_lines[j].text,
+                confidence=fuzz.ratio(old_lines[i].text, new_lines[j].text) / 100.0,
             )
         )
+
+    for i, old_line in enumerate(old_lines):
+        if i not in matched_old:
+            records.append(
+                DiffRecord(
+                    zone=zone_label_for_bbox(old_line.bbox, *page_size),
+                    change_type=ChangeType.TEXT_REMOVED,
+                    bbox=old_line.bbox,
+                    old_value=old_line.text,
+                )
+            )
+    for j, new_line in enumerate(new_lines):
+        if j not in used_new:
+            records.append(
+                DiffRecord(
+                    zone=zone_label_for_bbox(new_line.bbox, *page_size),
+                    change_type=ChangeType.TEXT_ADDED,
+                    bbox=new_line.bbox,
+                    new_value=new_line.text,
+                )
+            )
 
     return records
 

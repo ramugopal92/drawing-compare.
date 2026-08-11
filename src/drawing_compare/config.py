@@ -55,6 +55,33 @@ GEOMETRY_MATCH_TOLERANCE_PT = 1.0
 # engineer wants to review that as a single edit.
 GEOMETRY_CLUSTER_GAP_PT = 10.0
 
+# Two clusters this close, one removed and one added, are treated as the
+# same feature edited in place rather than as an unrelated deletion plus an
+# unrelated addition. Real revisions almost never delete something and add
+# an unrelated thing of the same size in the same spot.
+CLUSTER_PAIR_MAX_DISTANCE_PT = 60.0
+
+# ...and only if their primitive counts are within this ratio of each other.
+CLUSTER_PAIR_COUNT_RATIO = 0.5
+
+# A leftover removed line and added line this close together are the same
+# line of text edited in place, however different the wording. Without this
+# a part number change reads as an unexplained deletion next to an
+# unexplained addition, and the engineer has to pair them up by eye.
+TEXT_PAIR_MAX_DISTANCE_PT = 30.0
+
+# Text rendered as vector outlines (some CAD exports do this for certain
+# fonts) produces clusters of hundreds of tiny paths inside a few square
+# points. No real design feature has that density, so clusters above this
+# many primitives per square point are discarded as glyph outlines.
+GEOMETRY_MAX_CLUSTER_DENSITY = 1.0
+
+# Line-weight-only changes are usually a plotting difference between the two
+# exports, not a design change, and they can easily outnumber real changes
+# by 10:1. Off by default; when disabled they are still counted and reported
+# as a single sheet-level note.
+REPORT_LINE_WEIGHT_CHANGES = False
+
 # A cluster made of fewer primitives than this is usually noise (a hatch
 # fragment, a rounding artifact) rather than a real design change.
 GEOMETRY_MIN_CLUSTER_PRIMITIVES = 2
@@ -65,7 +92,7 @@ MAX_REPORT_ROWS_PER_SHEET = 300
 
 # Text/OCR diff: two text spans are considered a positional match if their
 # centers are within this many PDF points (1/72 inch) after alignment.
-TEXT_POSITION_TOLERANCE_PT = 12.0
+TEXT_POSITION_TOLERANCE_PT = 20.0
 
 # Text/OCR diff: minimum fuzzy-match ratio (0-100, rapidfuzz) to call two
 # text strings "the same" (small OCR noise allowed) vs. "changed".
