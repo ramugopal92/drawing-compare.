@@ -18,6 +18,8 @@ doesn't need to know which stage produced a given row — mirrors the unified
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from enum import Enum
 
@@ -30,6 +32,8 @@ from .config import (
     GEOMETRY_CLUSTER_GAP_PT,
     GEOMETRY_MATCH_TOLERANCE_PT,
     GEOMETRY_MIN_CLUSTER_PRIMITIVES,
+    DUAL_DIMENSION_AGGREGATE_THRESHOLD,
+    GLYPH_JOIN_GAP_RATIO,
     GEOMETRY_MAX_CLUSTER_DENSITY,
     TEXT_MASK_PADDING_PT,
     REPORT_LINE_WEIGHT_CHANGES,
@@ -537,7 +541,24 @@ def _group_spans_into_lines(spans: list[TextSpan]) -> list[TextSpan]:
 
     merged: list[TextSpan] = []
     for group in lines:
-        text = " ".join(s.text for s in group).strip()
+        # Join with a space only where the fragments were actually separated
+        # on the page. Some exports emit rotated or kerned text one glyph at
+        # a time, and joining those with spaces yields "5 2 4 . 5 4" instead
+        # of "524.54" — which then fails to match its counterpart and is
+        # reported as a change that never happened.
+        pieces: list[str] = []
+        for position, span in enumerate(group):
+            if position:
+                previous = group[position - 1]
+                height = max(previous.bbox[3] - previous.bbox[1], 1.0)
+                gap = span.bbox[0] - previous.bbox[2]
+                # Measured on real exports, glyph-level splits sit at a gap
+                # ratio of ~0.00 and genuine word spaces at ~0.28, so the
+                # threshold has plenty of clearance either side.
+                if gap > height * GLYPH_JOIN_GAP_RATIO:
+                    pieces.append(" ")
+            pieces.append(span.text)
+        text = "".join(pieces).strip()
         if not text:
             continue
         merged.append(
@@ -691,9 +712,10 @@ def diff_text(
                     old_value=old_line.text,
                 )
             )
+    added_records: list[DiffRecord] = []
     for j, new_line in enumerate(new_lines):
         if j not in used_new:
-            records.append(
+            added_records.append(
                 DiffRecord(
                     zone=zone_label_for_bbox(new_line.bbox, *page_size),
                     change_type=ChangeType.TEXT_ADDED,
@@ -702,7 +724,64 @@ def diff_text(
                 )
             )
 
+    records.extend(_collapse_dual_dimensions(added_records, old_lines, page_size))
     return records
+
+
+_METRIC_VALUE_RE = re.compile(r"^\d{1,5}(?:\.\d{1,2})?$")
+
+
+def _collapse_dual_dimensions(
+    added: list[DiffRecord],
+    old_lines: list[TextSpan],
+    page_size: tuple[float, float],
+) -> list[DiffRecord]:
+    """
+    Fold "added metric equivalent" lines into a single row.
+
+    When a drawing is dual-dimensioned, every imperial dimension gains a
+    bare metric value directly beneath it. Each one is a real addition, but
+    together they are one drafting decision — and listed individually they
+    outnumber the actual design change by fifty to one.
+
+    A line qualifies only if it is a bare number sitting just below an
+    existing dimension that did not itself change, so a genuinely new
+    dimension elsewhere on the sheet is still reported on its own.
+    """
+    candidates: list[DiffRecord] = []
+    others: list[DiffRecord] = []
+
+    for record in added:
+        text = (record.new_value or "").strip()
+        if not _METRIC_VALUE_RE.match(text):
+            others.append(record)
+            continue
+        x0, y0, x1, _ = record.bbox
+        above = any(
+            line.bbox[0] < x1
+            and line.bbox[2] > x0
+            and 0 < y0 - line.bbox[1] <= 22.0
+            for line in old_lines
+        )
+        (candidates if above else others).append(record)
+
+    if len(candidates) < DUAL_DIMENSION_AGGREGATE_THRESHOLD:
+        return added
+
+    boxes = [r.bbox for r in candidates]
+    others.append(
+        DiffRecord(
+            zone="sheet",
+            change_type=ChangeType.TEXT_ADDED,
+            bbox=_union_bbox(boxes),
+            new_value=(
+                f"dual dimensioning: metric equivalents added beneath "
+                f"{len(candidates)} dimensions"
+            ),
+            confidence=0.5,
+        )
+    )
+    return others
 
 
 def _aligned_bbox(bbox, alignment: AlignmentResult, dpi: int):

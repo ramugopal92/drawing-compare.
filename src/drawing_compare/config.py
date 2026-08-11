@@ -114,6 +114,18 @@ BOM_COLUMN_TOLERANCE_PT = 6.0
 # description column and still belong to that row.
 BOM_DESCRIPTION_INDENT_PT = 30.0
 
+# Dual dimensioning adds a metric equivalent beneath every imperial
+# dimension on the sheet. That is one drafting decision, not N hundred
+# changes, and listing each one buries the revision it was made alongside.
+# Below this count they are listed individually; at or above it they are
+# collapsed into a single row.
+DUAL_DIMENSION_AGGREGATE_THRESHOLD = 8
+
+# Fragments closer together than this fraction of the font height were not
+# separated on the page — they are one word split into glyphs by the
+# exporter, and joining them with a space produces "5 2 4 . 5 4".
+GLYPH_JOIN_GAP_RATIO = 0.10
+
 # Line-weight-only changes are usually a plotting difference between the two
 # exports, not a design change, and they can easily outnumber real changes
 # by 10:1. Off by default; when disabled they are still counted and reported

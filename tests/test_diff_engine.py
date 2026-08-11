@@ -81,3 +81,34 @@ def test_geometry_added_and_removed():
     types = {r.change_type for r in records}
     assert ChangeType.GEOMETRY_REMOVED in types
     assert ChangeType.GEOMETRY_ADDED in types
+
+
+# --- text reconstruction --------------------------------------------------
+
+
+def test_glyph_split_text_is_rejoined_without_spaces():
+    """Some exports emit rotated or kerned text one glyph at a time. Joining
+    those with spaces yields '5 2 4 . 5 4', which then fails to match its
+    unchanged counterpart and is reported as a change that never happened."""
+    from drawing_compare.diff_engine import _group_spans_into_lines
+    from drawing_compare.pdf_io import TextSpan
+
+    glyphs = [
+        TextSpan(text=ch, bbox=(100.0 + i * 4.0, 50.0, 104.0 + i * 4.0, 58.0), font_size=8.0)
+        for i, ch in enumerate("524.54")
+    ]
+    lines = _group_spans_into_lines(glyphs)
+    assert len(lines) == 1
+    assert lines[0].text == "524.54"
+
+
+def test_genuine_word_spacing_is_preserved():
+    from drawing_compare.diff_engine import _group_spans_into_lines
+    from drawing_compare.pdf_io import TextSpan
+
+    spans = [
+        TextSpan(text="PIPE,", bbox=(100.0, 50.0, 120.0, 58.0), font_size=8.0),
+        TextSpan(text="NPS", bbox=(123.0, 50.0, 138.0, 58.0), font_size=8.0),
+        TextSpan(text="2", bbox=(141.0, 50.0, 146.0, 58.0), font_size=8.0),
+    ]
+    assert _group_spans_into_lines(spans)[0].text == "PIPE, NPS 2"

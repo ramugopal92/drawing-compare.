@@ -89,7 +89,12 @@ _STANDARD_RE = re.compile(
 # A bare standard designation with the prefix stripped off, e.g. "B18.21.1".
 # The prefix is usually common to both sides, so it cancels out of the
 # changed-fragment set and only the number survives.
-_STANDARD_CODE_RE = re.compile(r"^[A-Z]{0,3}\d+\.\d+(?:\.\d+)*[A-Z]?$")
+# Must carry a letter prefix (B18.21.1) or at least two dots (16.5.1) —
+# without that it also matches a bare metric value like 1717.52, and every
+# dual dimension added to a drawing gets reported as a specification change.
+_STANDARD_CODE_RE = re.compile(
+    r"^(?:[A-Z]{1,3}\d+(?:\.\d+)+[A-Z]?|\d+\.\d+\.\d+[A-Z]?)$"
+)
 
 # Text that a PDF has rendered twice, offset by a fraction of a point, comes
 # back with every character doubled ("DDUUAALL"). Collapsing it makes the
