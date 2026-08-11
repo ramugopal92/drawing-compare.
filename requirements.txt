@@ -1,0 +1,28 @@
+# Core PDF + vector extraction
+PyMuPDF>=1.24.0        # a.k.a. "fitz" - reads PDF vector content + renders pages
+pdfplumber>=0.11.0     # secondary text/line extraction, used as a cross-check
+
+# Image processing / alignment
+opencv-python>=4.9.0
+numpy>=1.26.0
+Pillow>=10.3.0
+
+# OCR engines (ensemble)
+pytesseract>=0.3.10    # requires the Tesseract binary (see packages.txt for Streamlit Cloud)
+# easyocr>=1.7.1        # optional 2nd OCR engine — pulls in PyTorch (large + slow to build
+                         # on free hosting tiers). Uncomment once the core app is deployed
+                         # and working; core geometry/text diffing does not need this.
+
+# Text matching / fuzzy comparison
+rapidfuzz>=3.9.0
+
+# Data handling + reporting
+pandas>=2.2.0
+jinja2>=3.1.0          # HTML report templating
+matplotlib>=3.8.0      # evaluation charts (confusion matrix, metrics), same as notebook
+
+# UI
+streamlit>=1.36.0
+
+# Windows-only, for future SolidWorks add-in work (safe to skip on non-Windows dev machines)
+pywin32>=306; sys_platform == "win32"
