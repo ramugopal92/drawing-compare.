@@ -126,6 +126,20 @@ DUAL_DIMENSION_AGGREGATE_THRESHOLD = 8
 # exporter, and joining them with a space produces "5 2 4 . 5 4".
 GLYPH_JOIN_GAP_RATIO = 0.10
 
+# Geometry differences from a PDF can say where something changed but not
+# what it changed from or to — "3 lines (15 x 13 pt)" is not something an
+# engineer can verify or act on. They are off by default and summarised as
+# affected zones instead; feature-level geometry comparison needs the CAD
+# model, not a plot of it. Enable to list them individually.
+REPORT_GEOMETRY_CHANGES = False
+
+# Text that moved but reads identically is almost always a consequence of a
+# real change elsewhere — adding a note pushes the block below it down. Off
+# by default; a move larger than TEXT_RELOCATION_PT is reported regardless,
+# because a note moved from one view to another can change its meaning.
+REPORT_TEXT_MOVES = False
+TEXT_RELOCATION_PT = 250.0
+
 # Line-weight-only changes are usually a plotting difference between the two
 # exports, not a design change, and they can easily outnumber real changes
 # by 10:1. Off by default; when disabled they are still counted and reported

@@ -34,6 +34,9 @@ from .config import (
     GEOMETRY_MIN_CLUSTER_PRIMITIVES,
     DUAL_DIMENSION_AGGREGATE_THRESHOLD,
     GLYPH_JOIN_GAP_RATIO,
+    REPORT_GEOMETRY_CHANGES,
+    REPORT_TEXT_MOVES,
+    TEXT_RELOCATION_PT,
     GEOMETRY_MAX_CLUSTER_DENSITY,
     TEXT_MASK_PADDING_PT,
     REPORT_LINE_WEIGHT_CHANGES,
@@ -68,6 +71,16 @@ class DiffRecord:
     old_value: str | None = None
     new_value: str | None = None
     confidence: float = 1.0
+    # --- evidence trail -------------------------------------------------
+    # A checker has to be able to ask "how do you know?" of any row. These
+    # fields record how the detection was made, not just what it found, so
+    # a low-similarity text pairing or an OCR-sourced value can be weighed
+    # differently from an exact vector match.
+    source: str = "vector"            # vector | raster | ocr | table
+    match_basis: str | None = None    # how the two sides were paired
+    content_similarity: float | None = None
+    region: str | None = None         # title_block | revision_table | drawing_body
+    view: str | None = None           # "Detail A", "Section D-D", ...
 
 
 def _bbox_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -644,6 +657,8 @@ def diff_text(
                         old_value=old_line.text,
                         new_value=new_lines[best_j].text,
                         confidence=best_score / 100.0,
+                        match_basis="aligned position",
+                        content_similarity=best_score / 100.0,
                     )
                 )
 
@@ -661,7 +676,16 @@ def diff_text(
             used_new.add(best_j)
             matched_old.add(i)
             moved = _bbox_center_distance(old_line.bbox, new_lines[best_j].bbox)
-            if moved > TEXT_POSITION_TOLERANCE_PT:
+            # Identical text that merely shifted is the shadow of a real
+            # change elsewhere — inserting a note pushes everything below it
+            # down. Reported only when enabled, or when the move is large
+            # enough to be a relocation rather than a reflow.
+            same_text = old_line.text == new_lines[best_j].text
+            worth_reporting = (
+                moved > TEXT_POSITION_TOLERANCE_PT
+                and (not same_text or REPORT_TEXT_MOVES or moved >= TEXT_RELOCATION_PT)
+            )
+            if worth_reporting:
                 records.append(
                     DiffRecord(
                         zone=zone_label_for_bbox(old_line.bbox, *page_size),
@@ -670,6 +694,8 @@ def diff_text(
                         old_value=old_line.text,
                         new_value=f"{new_lines[best_j].text} (moved {moved:.0f} pt)",
                         confidence=best_score / 100.0,
+                        match_basis="content match, relocated",
+                        content_similarity=best_score / 100.0,
                     )
                 )
 
@@ -699,6 +725,8 @@ def diff_text(
                 old_value=old_lines[i].text,
                 new_value=new_lines[j].text,
                 confidence=fuzz.ratio(old_lines[i].text, new_lines[j].text) / 100.0,
+                match_basis="nearest unmatched line",
+                content_similarity=fuzz.ratio(old_lines[i].text, new_lines[j].text) / 100.0,
             )
         )
 
@@ -729,6 +757,8 @@ def diff_text(
 
 
 _METRIC_VALUE_RE = re.compile(r"^\d{1,5}(?:\.\d{1,2})?$")
+# Imperial dimension text: a whole number, a fraction, or both.
+_DIMENSION_TEXT_RE = re.compile(r"\d+\s+\d+/\d+|\d+/\d+|\b\d+(?:\.\d+)?\b")
 
 
 def _collapse_dual_dimensions(
@@ -756,14 +786,16 @@ def _collapse_dual_dimensions(
         if not _METRIC_VALUE_RE.match(text):
             others.append(record)
             continue
-        x0, y0, x1, _ = record.bbox
-        above = any(
-            line.bbox[0] < x1
-            and line.bbox[2] > x0
-            and 0 < y0 - line.bbox[1] <= 22.0
+        x0, y0, x1, y1 = record.bbox
+        # The metric equivalent is placed under, over, or beside its
+        # imperial dimension depending on the template, so accept any
+        # unchanged dimension text within a line or two in any direction.
+        near_existing = any(
+            _bbox_gap(record.bbox, line.bbox) <= 26.0
+            and _DIMENSION_TEXT_RE.search(line.text)
             for line in old_lines
         )
-        (candidates if above else others).append(record)
+        (candidates if near_existing else others).append(record)
 
     if len(candidates) < DUAL_DIMENSION_AGGREGATE_THRESHOLD:
         return added
@@ -813,13 +845,29 @@ def diff_pages(
     guess at which row is which; whatever it consumes is withheld from the
     text pass so nothing is reported twice.
     """
-    from .bom import diff_bom  # imported here to keep module import acyclic
-
-    records: list[DiffRecord] = []
-    records.extend(diff_geometry(old_page, new_page, alignment))
+    from .bom import diff_bom, extract_bom_rows  # local: keeps imports acyclic
+    from .layout import PARTS_LIST, Region, analyse_sheet
 
     old_lines = group_text_lines(old_page)
     new_lines = group_text_lines(new_page)
+
+    layout = analyse_sheet(old_lines, old_page.page_size_pt)
+    # The parts list is located by its heading, which gives only the heading's
+    # own extent. The extracted rows give the table's real footprint, so a
+    # change anywhere in the table is attributed to it rather than to the
+    # title block it usually sits beside.
+    rows, _, _ = extract_bom_rows(old_lines)
+    if rows:
+        table = _union_bbox([row.bbox for row in rows])
+        layout.regions = [r for r in layout.regions if r.name != PARTS_LIST]
+        layout.regions.append(
+            Region(name=PARTS_LIST, bbox=table, evidence=f"{len(rows)} parts-list rows")
+        )
+
+    records: list[DiffRecord] = []
+    if REPORT_GEOMETRY_CHANGES:
+        records.extend(diff_geometry(old_page, new_page, alignment))
+
     bom_records, used_old, used_new = diff_bom(
         old_lines, new_lines, old_page.page_size_pt
     )
@@ -827,4 +875,10 @@ def diff_pages(
     records.extend(
         diff_text(old_page, new_page, alignment, skip_old=used_old, skip_new=used_new)
     )
+
+    for record in records:
+        if record.region is None:
+            record.region = layout.region_for(record.bbox)
+        if record.view is None and record.region == "drawing_body":
+            record.view = layout.view_for(record.bbox)
     return records

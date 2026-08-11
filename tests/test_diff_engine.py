@@ -63,6 +63,9 @@ def test_unchanged_text_produces_no_record():
 
 
 def test_geometry_added_and_removed():
+    # Geometry rows are suppressed in the full pipeline by default (a PDF
+    # cannot say what a shape changed from or to), so this exercises the
+    # geometry pass directly.
     # Several primitives per side, not one: an isolated primitive is treated
     # as noise (a hatch fragment, a rounding artifact) and deliberately not
     # reported. Real edits move a cluster of geometry together.
@@ -77,7 +80,9 @@ def test_geometry_added_and_removed():
         VectorPrimitive(kind="line", bbox=(0, 204, 100, 204)),
     ])
 
-    records = diff_pages(old_page, new_page, IDENTITY_ALIGNMENT)
+    from drawing_compare.diff_engine import diff_geometry
+
+    records = diff_geometry(old_page, new_page, IDENTITY_ALIGNMENT)
     types = {r.change_type for r in records}
     assert ChangeType.GEOMETRY_REMOVED in types
     assert ChangeType.GEOMETRY_ADDED in types

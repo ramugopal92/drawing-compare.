@@ -43,13 +43,13 @@ def standard_table(part_10: str = "266635", desc_10: str = "4 FLAT WASHER, TYPE 
 
 
 def test_extracts_every_row_of_the_table():
-    rows, consumed = extract_bom_rows(standard_table())
+    rows, consumed, _ = extract_bom_rows(standard_table())
     assert [r.item for r in rows] == ["10", "9", "8", "7"]
     assert consumed
 
 
 def test_parses_columns_into_fields():
-    rows, _ = extract_bom_rows(standard_table())
+    rows, _, _ = extract_bom_rows(standard_table())
     row = next(r for r in rows if r.item == "10")
     assert row.part_number == "266635"
     assert row.quantity == "4"
@@ -64,13 +64,13 @@ def test_ignores_stray_integers_outside_the_item_column():
     lines = standard_table()
     lines += [cell("13", 120.0, 400.0, 12.0), cell("SCALE 1:35", 150.0, 400.0)]
     lines += [cell("67", 120.0, 420.0, 12.0), cell("SHEET 1 OF 2", 150.0, 420.0)]
-    rows, _ = extract_bom_rows(lines)
+    rows, _, _ = extract_bom_rows(lines)
     assert [r.item for r in rows] == ["10", "9", "8", "7"]
 
 
 def test_rejects_a_table_that_is_too_small_to_be_one():
     lines = bom_row("1", "123456", "2 BOLT", "ASME B18.2.1", "SST", 100.0)
-    rows, consumed = extract_bom_rows(lines)
+    rows, consumed, _ = extract_bom_rows(lines)
     assert rows == [] and consumed == set()
 
 
@@ -79,7 +79,7 @@ def test_row_needs_a_part_number_beside_the_item_number():
     for i, y in enumerate((100.0, 118.0, 136.0)):
         lines += [cell(str(i + 1), 623.0, y, 14.0), cell("SOME PROSE HERE", 657.0, y),
                   cell("MORE PROSE", 900.0, y)]
-    rows, _ = extract_bom_rows(lines)
+    rows, _, _ = extract_bom_rows(lines)
     assert rows == []
 
 
@@ -89,7 +89,7 @@ def test_wrapped_description_attaches_to_its_own_row():
     lines = standard_table()
     lines.append(cell("(0.656 ID X 1.25 OD X 0.1 THK)", 729.0, 100.0 - 4.0))
     lines.append(cell("EXTRA FOR ROW 9", 729.0, 100.0 + ROW_PITCH + 4.0))
-    rows, _ = extract_bom_rows(lines)
+    rows, _, _ = extract_bom_rows(lines)
     row_10 = next(r for r in rows if r.item == "10")
     row_9 = next(r for r in rows if r.item == "9")
     assert "0.656 ID" in row_10.description
@@ -181,13 +181,13 @@ def test_merged_row_layout_is_extracted():
     cell separately. Another returns a whole row as one line, and the parts
     list was silently not found — its rows fell through to the text diff and
     were mistaken for dimension changes."""
-    rows, consumed = extract_bom_rows(merged_table())
+    rows, consumed, _ = extract_bom_rows(merged_table())
     assert [r.item for r in rows] == ["3", "2", "1", "4"]
     assert consumed
 
 
 def test_merged_row_columns_are_parsed():
-    rows, _ = extract_bom_rows(merged_table())
+    rows, _, _ = extract_bom_rows(merged_table())
     row = next(r for r in rows if r.item == "3")
     assert row.part_number == "321795"
     assert row.quantity == "2"

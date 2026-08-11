@@ -114,6 +114,8 @@ class PageComparison:
     pair: PagePair
     result: CompareResult | None = None
     error: str | None = None
+    views_added: list[str] = field(default_factory=list)
+    views_removed: list[str] = field(default_factory=list)
 
     @property
     def record_count(self) -> int:
@@ -139,6 +141,7 @@ class DocumentCompareResult:
     old_page_count: int = 0
     new_page_count: int = 0
     match_mode: str = "auto"
+    title_block: object | None = None
 
     @property
     def total_records(self) -> int:
@@ -207,12 +210,47 @@ class DocumentCompareResult:
         )
 
     def drawing_title(self) -> str | None:
-        """Drawing identity read off the sheets, for titling the report."""
+        """
+        Drawing identity for the report heading.
+
+        Read from the title block by label — DRAWING NO, TITLE, REVISION —
+        rather than by pattern-matching the title-block area, which picks up
+        the company phone number as often as the drawing number.
+        """
+        if self.title_block is not None:
+            described = self.title_block.describe()
+            if described:
+                return described
         for pair in self.plan.pairs:
             identity = pair.old_identity or pair.new_identity
             if identity and identity.label():
                 return identity.label()
         return None
+
+    def view_changes(self) -> tuple[list[str], list[str]]:
+        """Views added and removed across the whole set."""
+        added: list[str] = []
+        removed: list[str] = []
+        for page in self.pages:
+            added.extend(page.views_added)
+            removed.extend(page.views_removed)
+        return sorted(set(added)), sorted(set(removed))
+
+
+def _view_inventory_change(result: CompareResult) -> tuple[list[str], list[str]]:
+    """
+    Which drawing views were added or removed on this sheet.
+
+    Once views are recovered as objects this is a set difference — "Section
+    D-D added", "Detail G removed" — rather than something a reader has to
+    infer from scattered geometry differences.
+    """
+    from .diff_engine import group_text_lines
+    from .layout import analyse_sheet, diff_view_inventory
+
+    old_layout = analyse_sheet(group_text_lines(result.old_page), result.old_page.page_size_pt)
+    new_layout = analyse_sheet(group_text_lines(result.new_page), result.new_page.page_size_pt)
+    return diff_view_inventory(old_layout, new_layout)
 
 
 def compare_documents(
@@ -271,6 +309,7 @@ def compare_documents(
                 old_page_index=pair.old_index,
                 new_page_index=pair.new_index,
             )
+            views_added, views_removed = _view_inventory_change(result)
             if not keep_page_data:
                 # Drop the heavy per-page arrays; the overlay is already
                 # rendered and the diff records are self-contained.
@@ -278,9 +317,30 @@ def compare_documents(
                 result.new_page.raster_image = None
                 result.old_page.vector_primitives = []
                 result.new_page.vector_primitives = []
-            comparisons.append(PageComparison(pair=pair, result=result))
+            comparisons.append(
+                PageComparison(
+                    pair=pair,
+                    result=result,
+                    views_added=views_added,
+                    views_removed=views_removed,
+                )
+            )
         except Exception as exc:  # one bad sheet shouldn't sink the set
             comparisons.append(PageComparison(pair=pair, error=f"{type(exc).__name__}: {exc}"))
+
+    title_block = None
+    try:
+        from .diff_engine import group_text_lines
+        from .layout import analyse_sheet, extract_title_block_fields
+        from .pdf_io import load_pdf_page
+
+        first = load_pdf_page(new_pdf, 0)
+        lines = group_text_lines(first)
+        title_block = extract_title_block_fields(
+            lines, analyse_sheet(lines, first.page_size_pt)
+        )
+    except Exception:
+        title_block = None
 
     return DocumentCompareResult(
         old_pdf=old_pdf,
@@ -290,4 +350,5 @@ def compare_documents(
         old_page_count=len(old_summaries),
         new_page_count=len(new_summaries),
         match_mode=match_mode,
+        title_block=title_block,
     )

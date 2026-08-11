@@ -95,6 +95,45 @@ def _pill(severity: Severity) -> str:
     )
 
 
+def _where(change: ClassifiedChange) -> str:
+    """
+    Where a change is, said the way an engineer would say it.
+
+    A grid reference locates a change but does not identify what it is part
+    of. "Detail A-A" or "parts list" tells the reader what they are looking
+    at before they look.
+    """
+    record = change.record
+    view = getattr(record, "view", None)
+    if view:
+        return f"{view} ({record.zone})"
+    region = getattr(record, "region", None)
+    if region and region != "drawing_body":
+        return f"{region.replace('_', ' ')} ({record.zone})"
+    return record.zone
+
+
+def _view_inventory_section(doc_result) -> str:
+    """Views added or removed, listed before the change detail."""
+    try:
+        added, removed = doc_result.view_changes()
+    except Exception:
+        return ""
+    if not added and not removed:
+        return ""
+    rows = "".join(
+        f"<tr><td>{_esc(name)}</td><td>{label}</td></tr>"
+        for label, names in (("added", added), ("removed", removed))
+        for name in names
+    )
+    return f"""
+    <h2>Views added and removed</h2>
+    <p class="sub" style="margin-bottom:6px">Drawing views present in one
+    revision only, read from each sheet's own view labels.</p>
+    <table><thead><tr><th>View</th><th style="width:110px">Change</th></tr></thead>
+    <tbody>{rows}</tbody></table>"""
+
+
 def _document_control(prov: ReportProvenance, drawing_title: str | None) -> str:
     def file_rows(label: str, f) -> str:
         return f"""
@@ -182,7 +221,7 @@ def _critical_section(items: list[tuple[str, ClassifiedChange]]) -> str:
     <p class="sub" style="margin-bottom:6px">Changes that alter the part as made or
     bought — materials, specifications, part numbers, quantities, dimensions and
     tolerances.</p>
-    <table><thead><tr><th style="width:36px">#</th><th>Sheet</th><th style="width:56px">Zone</th>
+    <table><thead><tr><th style="width:36px">#</th><th>Sheet</th><th style="width:130px">Where</th>
     <th style="width:150px">Category</th><th>Was</th><th>Is now</th></tr></thead>
     <tbody>{rows}</tbody></table>"""
 
@@ -197,14 +236,16 @@ def _change_table(classified: list[ClassifiedChange]) -> str:
             last = c.severity
             count = sum(1 for x in classified if x.severity is c.severity)
             rows.append(
-                f'<tr><td colspan="5" style="background:{SEVERITY_TINT[c.severity]};'
+                f'<tr><td colspan="6" style="background:{SEVERITY_TINT[c.severity]};'
                 f"border-left:3px solid {SEVERITY_COLOUR[c.severity]};font-weight:600;"
                 f'color:{SEVERITY_COLOUR[c.severity]}">{c.severity.value} — {count} change(s)</td></tr>'
             )
         rows.append(
-            f"<tr><td>{n}</td><td>{_esc(c.zone)}</td><td>{_esc(c.category.value)}</td>"
-            f"<td>{_esc(c.record.old_value or '—')}</td>"
-            f"<td>{_esc(c.record.new_value or '—')}</td></tr>"
+            f"<tr><td>{n}</td><td>{_esc(_where(c))}</td><td>{_esc(c.category.value)}</td>"
+            f"<td>{_esc(c.display_old or c.record.old_value or '—')}</td>"
+            f"<td>{_esc(c.display_new or c.record.new_value or '—')}</td>"
+            f"<td class='mono' style='font-size:10.5px;color:var(--muted)'>"
+            f"{_esc(c.record.match_basis or c.record.source)}</td></tr>"
         )
     if not rows:
         return "<p class='sub'>No differences detected on this sheet.</p>"
@@ -216,8 +257,9 @@ def _change_table(classified: list[ClassifiedChange]) -> str:
     )
     return (
         trunc
-        + '<table><thead><tr><th style="width:36px">#</th><th style="width:56px">Zone</th>'
+        + '<table><thead><tr><th style="width:36px">#</th><th style="width:130px">Where</th>'
         '<th style="width:150px">Category</th><th>Was</th><th>Is now</th>'
+        '<th style="width:120px">Evidence</th>'
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     )
 
@@ -313,6 +355,7 @@ def save_structured_report(doc_result, prov: ReportProvenance, path: str | Path,
 {_document_control(prov, drawing_title)}
 {_executive_summary(all_changes, doc_result.plan.summary())}
 {_critical_section(critical)}
+{_view_inventory_section(doc_result)}
 <h2 style="margin-top:36px">Sheet detail</h2>
 {_sheet_sections(doc_result)}
 {_signoff()}

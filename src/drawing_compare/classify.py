@@ -38,6 +38,8 @@ class Severity(str, Enum):
 
 class ChangeCategory(str, Enum):
     BOM_ITEM = "Bill of materials"
+    BOM_STRUCTURE = "Parts list structure"
+    DEFAULT_TOLERANCE = "General tolerance block"
     PART_SUBSTITUTION = "Part substitution"
     MATERIAL_SPEC = "Material / specification"
     QUANTITY = "Quantity"
@@ -53,6 +55,8 @@ class ChangeCategory(str, Enum):
 
 SEVERITY_OF: dict[ChangeCategory, Severity] = {
     ChangeCategory.BOM_ITEM: Severity.CRITICAL,
+    ChangeCategory.BOM_STRUCTURE: Severity.MAJOR,
+    ChangeCategory.DEFAULT_TOLERANCE: Severity.MAJOR,
     ChangeCategory.PART_SUBSTITUTION: Severity.CRITICAL,
     ChangeCategory.MATERIAL_SPEC: Severity.CRITICAL,
     ChangeCategory.QUANTITY: Severity.CRITICAL,
@@ -155,6 +159,9 @@ _COMPONENT_RE = re.compile(
 
 # Records produced by the structured parts-list comparator, which already
 # know their item number and column.
+# The decimal-place notation of a general tolerance block: .X, .XX, .XXX
+_DECIMAL_PLACES_RE = re.compile(r"\.X{1,4}\b|\bDECIMALS\b|\bFRACTIONS\b|\bANGLES\b")
+
 _BOM_RECORD_RE = re.compile(r"^BOM item (\d+) ([a-z ]+):", re.IGNORECASE)
 
 # Quantity: a bare small integer, or an explicit QTY column.
@@ -313,6 +320,25 @@ def classify_record(record: DiffRecord) -> ClassifiedChange:
     edited = removed_frag | added_frag
     edited_text = " ".join(sorted(edited))
 
+    # Region is decisive evidence, so it is consulted before any content
+    # rule. A tolerance printed in the title block is the sheet's *default*
+    # tolerance; the identical text on a dimension applies to one feature.
+    # They are indistinguishable as strings and mean entirely different
+    # things, so classifying on text alone reports the general tolerance
+    # block as though a dimension had been retoleranced.
+    if record.region == "title_block":
+        if _TOLERANCE_RE.search(both) or _DECIMAL_PLACES_RE.search(both):
+            return tag(
+                ChangeCategory.DEFAULT_TOLERANCE,
+                "general tolerance block in the title block",
+            )
+        return tag(ChangeCategory.TITLE_BLOCK, "title block content")
+    if record.region == "revision_table":
+        return tag(ChangeCategory.TITLE_BLOCK, "revision table content")
+
+    if (record.old_value or "").lower().startswith("parts list"):
+        return tag(ChangeCategory.BOM_STRUCTURE, "parts-list column structure changed")
+
     # Records emitted by the structured parts-list comparator name their
     # own column, so they are classified from that rather than re-parsed.
     bom_field = _BOM_RECORD_RE.match(old) or _BOM_RECORD_RE.match(new)
@@ -410,9 +436,53 @@ def _make(
     )
 
 
+def _aggregate_tolerance_block(
+    classified: list[ClassifiedChange],
+) -> list[ClassifiedChange]:
+    """
+    Collapse the general tolerance block into one row.
+
+    Reformatting the block — adding metric equivalents, say — rewrites every
+    line in it, and the text differ splits those across the reflow, so half
+    the rows read as fragments. It is one drafting decision and belongs on
+    one line, with the individual values kept in the detail.
+    """
+    block = [c for c in classified if c.category is ChangeCategory.DEFAULT_TOLERANCE]
+    if len(block) < 3:
+        return classified
+
+    others = [c for c in classified if c.category is not ChangeCategory.DEFAULT_TOLERANCE]
+    pairs = [
+        f"{(c.display_old or c.record.old_value or '—')} \u2192 "
+        f"{(c.display_new or c.record.new_value or '—')}"
+        for c in block
+        if (c.record.old_value or c.record.new_value)
+    ]
+    summary = DiffRecord(
+        zone=block[0].zone,
+        change_type=block[0].record.change_type,
+        bbox=block[0].record.bbox,
+        old_value="general tolerance block",
+        new_value=f"revised in {len(block)} place(s): " + "; ".join(pairs[:6]),
+        confidence=0.8,
+        source=block[0].record.source,
+        match_basis="title-block tolerance aggregation",
+        region="title_block",
+    )
+    others.append(
+        ClassifiedChange(
+            record=summary,
+            category=ChangeCategory.DEFAULT_TOLERANCE,
+            severity=SEVERITY_OF[ChangeCategory.DEFAULT_TOLERANCE],
+            rationale=f"{len(block)} tolerance-block lines aggregated",
+        )
+    )
+    return others
+
+
 def classify_records(records: list[DiffRecord]) -> list[ClassifiedChange]:
     """Classify and sort: most severe first, then grouped by category."""
-    classified = [classify_record(r) for r in records]
+    classified = _aggregate_tolerance_block([classify_record(r) for r in records])
     classified.sort(
         key=lambda c: (SEVERITY_ORDER[c.severity], c.category.value, c.zone)
     )
