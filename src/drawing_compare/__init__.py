@@ -13,4 +13,4 @@ See README.md for architecture and usage. The short version:
     result.to_json("report.json")
 """
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"

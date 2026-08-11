@@ -157,6 +157,35 @@ _COMPONENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Revision-history text, recognised by wording rather than by position.
+# Region detection is the primary route, but it depends on the revision
+# table's geometry being found, and that varies with the PDF extractor. The
+# wording does not: a revision description is always either an initial
+# release or a "<thing> WAS <other thing>" statement, and it is always
+# accompanied by an EC number and approver initials. Matching on content
+# makes the classification hold even where the region was missed.
+_REVISION_DESCRIPTION_RE = re.compile(
+    r"\bINITIAL\s+RELEASE\b"
+    r"|\bWAS\b\s*(?:[\u00d8\u2300]|\d|[A-Z]{1,4}\s*\d)"
+    r"|\bADDED\s+DUAL\s+DIMENSIONS?\b"
+    r"|\bRE-?ISSUED?\b|\bREDRAWN\b|\bREVISED\s+PER\b"
+    r"|\bUPDATED\s+PER\s+EC\b|\bPER\s+EC-?\d+\b",
+    re.IGNORECASE,
+)
+
+# A view or detail label. These are annotations naming a view, not
+# dimensions — "DETAIL F" and "SCALE 1 : 8" both contain digits and would
+# otherwise be read as dimension values.
+_VIEW_LABEL_TEXT_RE = re.compile(
+    r"^\s*(?:DETAIL\s+[A-Z]{1,2}(?:-[A-Z]{1,2})?"
+    r"|SECTION\s+[A-Z]{1,2}\s*-\s*[A-Z]{1,2}"
+    r"|SCALE\s*\d+\s*:\s*\d+"
+    r"|(?:[A-Z ]*\s)?(?:ISOMETRIC|EXPLODED|AUXILIARY|ENLARGED|BROKEN-OUT)"
+    r"[A-Z ]*VIEW"
+    r"|(?:FRONT|TOP|BOTTOM|LEFT|RIGHT|REAR|BACK|PLAN|ELEVATION)\s+VIEW)\s*$",
+    re.IGNORECASE,
+)
+
 # Records produced by the structured parts-list comparator, which already
 # know their item number and column.
 # The decimal-place notation of a general tolerance block: .X, .XX, .XXX
@@ -319,6 +348,16 @@ def classify_record(record: DiffRecord) -> ClassifiedChange:
     removed_frag, added_frag = _changed_fragments(old, new)
     edited = removed_frag | added_frag
     edited_text = " ".join(sorted(edited))
+
+    # Content rules that must win regardless of where the text sits, because
+    # region detection depends on geometry that varies between extractors.
+    if _REVISION_DESCRIPTION_RE.search(both):
+        return tag(
+            ChangeCategory.TITLE_BLOCK,
+            "revision history description",
+        )
+    if _VIEW_LABEL_TEXT_RE.match(old or "") or _VIEW_LABEL_TEXT_RE.match(new or ""):
+        return tag(ChangeCategory.ANNOTATION, "view or detail label")
 
     # Region is decisive evidence, so it is consulted before any content
     # rule. A tolerance printed in the title block is the sheet's *default*

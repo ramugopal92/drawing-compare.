@@ -178,3 +178,34 @@ def test_describe_reads_as_a_change_sentence():
     assert classify_record(text_change("266635", "266673")).describe() == "266635 → 266673"
     assert classify_record(text_change(None, "NEW NOTE")).describe() == "added: NEW NOTE"
     assert classify_record(text_change("OLD NOTE", None)).describe() == "removed: OLD NOTE"
+
+
+def test_revision_description_classified_by_wording_not_position():
+    """Regression: the revision row was classified from its region, which
+    depends on the revision table's geometry being found — and that varies
+    with the PDF extractor. 'BAR WAS Ø5/8' contains a fraction, so wherever
+    the region was missed it was read as a dimension change."""
+    result = classify_record(
+        text_change("INITIAL RELEASE", "BAR WAS \u00d85/8, ADDED DUAL DIMENSIONS", zone="D4")
+    )
+    assert result.category is ChangeCategory.TITLE_BLOCK
+    assert result.severity is Severity.INFORMATIONAL
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("DETAIL F", "DETAIL G"),
+        ("SCALE 1 : 8", "SCALE 1 : 6"),
+        (None, "SECTION D-D"),
+        (None, "ISOMETRIC FRONT RIGHT VIEW"),
+    ],
+)
+def test_view_labels_are_annotations_not_dimensions(old, new):
+    """View labels carry digits ('DETAIL F', 'SCALE 1 : 8') and were being
+    read as dimension values."""
+    assert classify_record(text_change(old, new)).category is ChangeCategory.ANNOTATION
+
+
+def test_genuine_dimension_still_wins_over_the_new_rules():
+    assert classify_record(text_change("138 1/2", "140 1/4")).category is ChangeCategory.DIMENSION

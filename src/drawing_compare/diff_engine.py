@@ -909,19 +909,20 @@ def diff_pages(
     old_lines = group_text_lines(old_page)
     new_lines = group_text_lines(new_page)
 
-    layout = analyse_sheet(old_lines, old_page.page_size_pt)
-    # The parts list is located by its heading, which gives only the heading's
-    # own extent. The extracted rows give the table's real footprint, so a
-    # change anywhere in the table is attributed to it rather than to the
-    # title block it usually sits beside.
-    # Parts-list and title-block structure are read from RAW SPANS, never
-    # from grouped lines. Line grouping merges a table row into one string,
-    # which destroys the cell boundaries that tell a description from a cut
-    # length — and different PDF extractors merge differently, so anything
-    # built on grouped lines works with one library and silently fails with
-    # another.
+    # Structured readers all work on CELLS, never on grouped lines. Line
+    # grouping merges a whole table row — or a view label and its neighbour —
+    # into one string, destroying the boundaries these readers depend on, and
+    # different PDF libraries merge differently. Anything built on lines
+    # therefore works with one extractor and silently fails with another.
     old_cells = group_text_cells(old_page)
     new_cells = group_text_cells(new_page)
+
+    layout = analyse_sheet(old_cells, old_page.page_size_pt)
+
+    # The parts list is located by its heading, which gives only the
+    # heading's own extent. The extracted rows give the table's real
+    # footprint, so a change anywhere in the table is attributed to it
+    # rather than to the title block it usually sits beside.
     rows, _, _ = extract_bom_rows(old_cells)
     if rows:
         table = _union_bbox([row.bbox for row in rows])
