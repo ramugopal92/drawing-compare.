@@ -183,3 +183,19 @@ def test_fallback_does_not_reject_hyphenated_drawing_numbers():
         text_tokens=[], title_block_tokens=["DWG", "NO", "12345-678"],
     )
     assert extract_identity(page).drawing_number == "12345-678"
+
+
+def test_drawing_number_regex_does_not_leak_across_words():
+    """Regression: the digit lookahead was unbounded (.*\\d), so it checked
+    for a digit ANYWHERE later in the whole title-block text rather than
+    within the candidate token itself. Every word before a real drawing
+    number satisfied it, and the company name outscored the actual number
+    once tight kerning joined it into one long token."""
+    from drawing_compare.page_matcher import _DRAWING_NO_RE
+
+    text = "WHITEWATER WEST INDUSTRIES LTD. 442079-FAB"
+    assert _DRAWING_NO_RE.findall(text) == ["442079-FAB"]
+
+    # The joined-by-kerning case that actually broke in production.
+    joined = "WHITEWATERWEST INDUSTRIES LTD 442079-FAB"
+    assert "WHITEWATERWEST" not in _DRAWING_NO_RE.findall(joined)

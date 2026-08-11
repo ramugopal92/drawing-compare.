@@ -27,6 +27,7 @@ from drawing_compare.pdf_io import scan_pdf_pages
 from drawing_compare.pipeline import compare_documents
 from drawing_compare.provenance import build_provenance
 from drawing_compare.structured_report import (
+    _where,
     save_structured_json,
     save_structured_report,
 )
@@ -234,6 +235,17 @@ else:
                     caption="Baseline sheet with changes highlighted",
                     use_container_width=True,
                 )
+                ok, buf = cv2.imencode(".png", result.overlay_image)
+                if ok:
+                    st.download_button(
+                        "Download full-resolution overlay",
+                        data=buf.tobytes(),
+                        file_name=f"{page.pair.label().replace(' ', '_')}_overlay.png",
+                        mime="image/png",
+                        key=f"overlay_dl_{page.pair.old_index}_{page.pair.new_index}",
+                        help="Opens at full resolution in your image viewer, "
+                        "where you can zoom — the preview above is scaled to fit.",
+                    )
             with right:
                 st.dataframe(
                     pd.DataFrame(
@@ -241,7 +253,10 @@ else:
                             {
                                 "Severity": c.severity.value,
                                 "Category": c.category.value,
-                                "Zone": c.zone,
+                                # View or region, not the bare zone code — "Detail
+                                # A-A" is something a reviewer can act on; "C4" on
+                                # its own means opening the drawing to find out.
+                                "Where": _where(c),
                                 "Was": c.record.old_value or "—",
                                 "Is now": c.record.new_value or "—",
                             }
@@ -249,6 +264,10 @@ else:
                         ]
                     ),
                     hide_index=True, use_container_width=True, height=460,
+                    column_config={
+                        "Was": st.column_config.TextColumn(width="medium"),
+                        "Is now": st.column_config.TextColumn(width="medium"),
+                    },
                 )
 
 # ------------------------------------------------------------- downloads
@@ -257,11 +276,12 @@ st.markdown("### Issue report")
 if not reviewer:
     st.caption("Tip: fill in **Prepared by** in the sidebar so the report is attributable.")
 
-drawing_title = None
-ident = next((p.old_identity or p.new_identity for p in doc.plan.pairs
-              if (p.old_identity or p.new_identity)), None)
-if ident and ident.label():
-    drawing_title = ident.label()
+# doc.drawing_title() is the single, validated source for this — it reads
+# the title block by label first, and only falls back to sheet-pairing
+# identity (also regex-guarded) if that finds nothing. Building an ad-hoc
+# guess here duplicated that logic without its safeguards, which is how a
+# company name ended up as the report title.
+drawing_title = doc.drawing_title()
 
 html_path = tmp_dir / "comparison_report.html"
 json_path = tmp_dir / "comparison_report.json"

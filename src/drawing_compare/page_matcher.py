@@ -38,7 +38,15 @@ _SHEET_OF_RE = re.compile(
 # Bare "SHEET 2" with no total
 _SHEET_BARE_RE = re.compile(r"\bSH(?:EET|T|\.)?\s*[:.]?\s*(\d{1,3})\b", re.IGNORECASE)
 # Drawing/part numbers: 3+ chars, digits with separators, e.g. 12345-678, A-1024_B
-_DRAWING_NO_RE = re.compile(r"\b(?=[A-Z0-9][A-Z0-9\-_/]{4,})(?=.*\d)[A-Z0-9\-_/]{5,}\b")
+# The digit lookahead is scoped to [A-Z0-9\-_/]* — characters the match
+# itself can consume — not to the unbounded ".*". An unscoped ".*\d" only
+# asks "does a digit exist anywhere later in the whole string", which any
+# word before a part number satisfies; "WHITEWATER" and "INDUSTRIES" both
+# wrongly qualified as drawing-number candidates purely because a real
+# drawing number happened to appear later in the same title block, and
+# outscored it on length once PyMuPDF's kerning joined "WHITEWATER" and
+# "WEST" into one 14-character token.
+_DRAWING_NO_RE = re.compile(r"\b(?=[A-Z0-9\-_/]*\d)[A-Z0-9][A-Z0-9\-_/]{4,}\b")
 
 # Excludes phone numbers, dates, and postal codes from the drawing-number
 # guess. This is a secondary path (layout.extract_title_block_fields is the
