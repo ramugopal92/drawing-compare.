@@ -37,6 +37,15 @@ from .pdf_io import TextSpan
 from .zones import zone_label_for_bbox
 
 _ITEM_CELL_RE = re.compile(r"^\d{1,3}$")
+# A whole row arriving as one line: item, part number, quantity, then the
+# description. Different PDF text extractors split table rows differently —
+# some return each cell separately, some merge a row into a single line —
+# so the extractor has to recognise both shapes or it silently finds no
+# parts list at all on half the drawings it is given.
+_ROW_LINE_RE = re.compile(
+    r"^(\d{1,3})\s+((?=[A-Z0-9\-/]*\d)[A-Z0-9][A-Z0-9\-/]{2,})\s+(\d{1,4})\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
 _PART_CELL_RE = re.compile(r"^(?=[A-Z0-9\-/]*\d)[A-Z0-9][A-Z0-9\-/]{2,}$", re.IGNORECASE)
 _QTY_PREFIX_RE = re.compile(r"^(\d{1,4})\s+(.*)$", re.DOTALL)
 _STANDARD_CELL_RE = re.compile(
@@ -98,10 +107,29 @@ def extract_bom_rows(lines: list[TextSpan]) -> tuple[list[BomRow], set[int]]:
     """
     Find parts-list rows among the page's text lines.
 
-    Returns the rows and the indices of every line consumed by them, so the
-    caller can exclude those lines from the general text diff instead of
-    reporting the same change twice.
+    Two shapes are recognised, because PDF text extractors disagree about
+    table rows: some emit each cell as its own line, others merge a whole
+    row into one. Handling only the first silently finds no parts list at
+    all on drawings produced by the second, and the rows then fall through
+    to the general text diff where they are mistaken for dimensions.
+
+    Returns the rows and the indices of every line consumed by them.
     """
+    rows, consumed = _extract_from_cells(lines)
+    if len(rows) < BOM_MIN_ROWS:
+        rows, consumed = _extract_from_row_lines(lines)
+    if len(rows) < BOM_MIN_ROWS:
+        return [], set()
+
+    rows.sort(key=lambda r: r.bbox[1])
+    _attach_wrapped_lines(rows, lines, consumed)
+    for row in rows:
+        _parse_columns(row)
+    return rows, consumed
+
+
+def _extract_from_cells(lines: list[TextSpan]) -> tuple[list[BomRow], set[int]]:
+    """Shape 1: the item number is its own cell, columns to its right."""
     candidates: list[tuple[int, TextSpan]] = [
         (i, line)
         for i, line in enumerate(lines)
@@ -112,9 +140,9 @@ def extract_bom_rows(lines: list[TextSpan]) -> tuple[list[BomRow], set[int]]:
         return [], set()
 
     # A real item column is vertically aligned. Grouping candidates by their
-    # left edge and keeping the largest group discards the stray integers
-    # that appear in title blocks, tolerance tables, and view labels, which
-    # would otherwise be read as parts-list rows in completely wrong places.
+    # left edge and keeping the largest group discards the stray integers in
+    # title blocks, tolerance tables and view labels, which would otherwise
+    # be read as parts-list rows in completely wrong places.
     by_column: dict[int, list[tuple[int, TextSpan]]] = {}
     for index, line in candidates:
         key = int(round(line.bbox[0] / BOM_COLUMN_TOLERANCE_PT))
@@ -125,7 +153,6 @@ def extract_bom_rows(lines: list[TextSpan]) -> tuple[list[BomRow], set[int]]:
 
     rows: list[BomRow] = []
     consumed: set[int] = set()
-
     for index, item_cell in column:
         baseline = item_cell.bbox[1]
         same_row = [
@@ -139,9 +166,6 @@ def extract_bom_rows(lines: list[TextSpan]) -> tuple[list[BomRow], set[int]]:
             continue
         same_row.sort(key=lambda pair: pair[1].bbox[0])
         texts = [line.text.strip() for _, line in same_row]
-
-        # A genuine parts-list row carries a part number immediately right
-        # of the item number.
         if not _PART_CELL_RE.match(texts[0]):
             continue
 
@@ -155,14 +179,52 @@ def extract_bom_rows(lines: list[TextSpan]) -> tuple[list[BomRow], set[int]]:
         )
         consumed.add(index)
         consumed.update(j for j, _ in same_row)
+    return rows, consumed
 
-    if len(rows) < BOM_MIN_ROWS:
+
+def _extract_from_row_lines(lines: list[TextSpan]) -> tuple[list[BomRow], set[int]]:
+    """Shape 2: the whole row arrives as one line beginning with the item
+    number, with any trailing columns as separate cells to its right."""
+    rows: list[BomRow] = []
+    consumed: set[int] = set()
+
+    anchors: list[tuple[int, TextSpan, re.Match]] = []
+    for i, line in enumerate(lines):
+        match = _ROW_LINE_RE.match(line.text.strip())
+        if match:
+            anchors.append((i, line, match))
+    if len(anchors) < BOM_MIN_ROWS:
         return [], set()
 
-    rows.sort(key=lambda r: r.bbox[1])
-    _attach_wrapped_lines(rows, lines, consumed)
-    for row in rows:
-        _parse_columns(row)
+    by_column: dict[int, list[tuple[int, TextSpan, re.Match]]] = {}
+    for index, line, match in anchors:
+        key = int(round(line.bbox[0] / BOM_COLUMN_TOLERANCE_PT))
+        by_column.setdefault(key, []).append((index, line, match))
+    column = max(by_column.values(), key=len)
+    if len(column) < BOM_MIN_ROWS:
+        return [], set()
+
+    for index, line, match in column:
+        item, part, quantity, remainder = match.groups()
+        trailing = [
+            (j, other)
+            for j, other in enumerate(lines)
+            if j != index
+            and abs(other.bbox[1] - line.bbox[1]) <= BOM_BASELINE_TOLERANCE_PT
+            and other.bbox[0] > line.bbox[2]
+        ]
+        trailing.sort(key=lambda pair: pair[1].bbox[0])
+
+        row = BomRow(
+            item=item,
+            bbox=_union([line.bbox] + [other.bbox for _, other in trailing]),
+            cell_boxes=[line.bbox] + [other.bbox for _, other in trailing],
+            cells=[part, f"{quantity} {remainder}".strip()]
+            + [other.text.strip() for _, other in trailing],
+        )
+        rows.append(row)
+        consumed.add(index)
+        consumed.update(j for j, _ in trailing)
     return rows, consumed
 
 

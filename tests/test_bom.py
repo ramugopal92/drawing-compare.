@@ -148,3 +148,57 @@ def test_added_and_removed_rows_are_reported():
 def test_no_table_present_is_handled():
     records, used_old, used_new = diff_bom([], [], PAGE)
     assert records == [] and used_old == set() and used_new == set()
+
+
+# ------------------------------------------- merged-row extraction shape
+
+
+def merged_row(item, part, qty, desc, spec, material, y):
+    """The other shape: PDF extractors that merge a table row into one line
+    return item, part, qty and description together, with trailing columns
+    still separate."""
+    return [
+        cell(f"{item} {part} {qty} {desc}", 623.0, y, 260.0),
+        cell(spec, 1010.0, y, 80.0),
+        cell(material, 1100.0, y, 90.0),
+    ]
+
+
+def merged_table(part_1: str = "321795", desc_1: str = "BAR, ROUND, 5/8") -> list[TextSpan]:
+    lines: list[TextSpan] = []
+    lines += merged_row("3", part_1, "2", desc_1, "ASTM A29", "STL / ASTM A108", 100.0)
+    lines += merged_row("2", part_1, "18", desc_1, "ASTM A29", "STL / ASTM A108",
+                        100.0 + ROW_PITCH)
+    lines += merged_row("1", part_1, "12", desc_1, "ASTM A29", "STL / ASTM A108",
+                        100.0 + 2 * ROW_PITCH)
+    lines += merged_row("4", "305726", "8", "D-RING, 1 1/2", "-", "-",
+                        100.0 + 3 * ROW_PITCH)
+    return lines
+
+
+def test_merged_row_layout_is_extracted():
+    """Regression: bom.py was built against an extractor that returns each
+    cell separately. Another returns a whole row as one line, and the parts
+    list was silently not found — its rows fell through to the text diff and
+    were mistaken for dimension changes."""
+    rows, consumed = extract_bom_rows(merged_table())
+    assert [r.item for r in rows] == ["3", "2", "1", "4"]
+    assert consumed
+
+
+def test_merged_row_columns_are_parsed():
+    rows, _ = extract_bom_rows(merged_table())
+    row = next(r for r in rows if r.item == "3")
+    assert row.part_number == "321795"
+    assert row.quantity == "2"
+    assert "BAR, ROUND, 5/8" in row.description
+    assert row.specification == "ASTM A29"
+
+
+def test_merged_row_part_substitution_is_detected():
+    records, _, _ = diff_bom(
+        merged_table(), merged_table(part_1="370170", desc_1="BAR, ROUND, 3/4"), PAGE
+    )
+    parts = [r for r in records if "part number" in (r.old_value or "")]
+    assert len(parts) == 3
+    assert all(r.new_value == "370170" for r in parts)
