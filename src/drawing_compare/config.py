@@ -84,11 +84,35 @@ CLUSTER_PAIR_COUNT_RATIO = 0.5
 # unexplained addition, and the engineer has to pair them up by eye.
 TEXT_PAIR_MAX_DISTANCE_PT = 30.0
 
+# Lines further apart than TEXT_PAIR_MAX_DISTANCE_PT can still be the same
+# line edited, provided the wording is recognisably similar. A parts-list
+# row that gains a parenthetical ("... 5/8 (0.656 ID X 1.25 OD)") wraps
+# differently and its centre shifts well past the positional limit, so
+# without this the row reads as a deletion beside an unrelated addition.
+TEXT_PAIR_FALLBACK_DISTANCE_PT = 140.0
+TEXT_PAIR_FALLBACK_SIMILARITY = 55
+
 # Text rendered as vector outlines (some CAD exports do this for certain
 # fonts) produces clusters of hundreds of tiny paths inside a few square
 # points. No real design feature has that density, so clusters above this
 # many primitives per square point are discarded as glyph outlines.
 GEOMETRY_MAX_CLUSTER_DENSITY = 1.0
+
+# --- bill of materials -------------------------------------------------
+# Cells of one parts-list row share a baseline to within this many points.
+BOM_BASELINE_TOLERANCE_PT = 3.0
+
+# Fewer rows than this and it is not a table — a couple of stray integers
+# beside some text is prose, and treating it as a parts list produces
+# nonsense columns.
+BOM_MIN_ROWS = 3
+
+# Cells of one column line up vertically to within this many points.
+BOM_COLUMN_TOLERANCE_PT = 6.0
+
+# How far a wrapped continuation line may be indented past the start of the
+# description column and still belong to that row.
+BOM_DESCRIPTION_INDENT_PT = 30.0
 
 # Line-weight-only changes are usually a plotting difference between the two
 # exports, not a design change, and they can easily outnumber real changes

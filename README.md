@@ -25,6 +25,10 @@ drawing_compare/
 │   ├── pdf_io.py          # load PDF, rasterize pages, extract vector primitives + text
 │   ├── alignment.py       # align old vs new page (feature-based homography)
 │   ├── page_matcher.py    # multi-page: decide which old sheet pairs with which new sheet
+│   ├── bom.py             # parts-list table extraction + item-anchored comparison
+│   ├── classify.py        # route raw diffs into engineering categories + severity
+│   ├── provenance.py      # file digests, settings, audit metadata
+│   ├── structured_report.py # controlled-document HTML/JSON report
 │   ├── zones.py           # map a bounding box -> drawing zone label (e.g. "B5")
 │   ├── ocr_ensemble.py    # multi-engine OCR with simple confidence voting
 │   ├── diff_engine.py     # geometry diff + text diff + change classification
@@ -35,6 +39,8 @@ drawing_compare/
 ├── tests/
 │   ├── test_zones.py
 │   ├── test_page_matcher.py
+│   ├── test_bom.py
+│   ├── test_classify.py
 │   └── test_diff_engine.py
 ├── solidworks_addin/       # future work — see its own README
 │   ├── README.md
@@ -88,9 +94,57 @@ python -m drawing_compare.cli old.pdf new.pdf --old-page 0 --new-page 0
 # pin the pairing by hand: old p.1 vs new p.1, old p.2 vs new p.4, ...
 python -m drawing_compare.cli old.pdf new.pdf --pairs 0:0,1:3,2:4
 
-# exit code 1 if anything changed, for a CI/PDM gate
-python -m drawing_compare.cli old.pdf new.pdf --fail-on-diff
+# exit 1 only when something CRITICAL changed — the sane CI/PDM gate.
+# --fail-on-diff also exists, but it trips on a copyright year.
+python -m drawing_compare.cli old.pdf new.pdf --fail-on-critical
+
+# attribute the report
+python -m drawing_compare.cli old.pdf new.pdf \
+    --reviewer "R. Gopal" --reference "ECO-519914"
 ```
+
+### What gets reported
+
+Raw differences are routed into engineering categories, each with a fixed
+severity, so a report leads with what matters instead of listing everything
+at once:
+
+| Severity | Categories | Meaning |
+|---|---|---|
+| **Critical** | Bill of materials, Part substitution, Material/specification, Quantity, Dimension, Tolerance | Changes the part as made or bought |
+| **Major** | Drawing note, Surface finish, Geometry | Changes how it is made or inspected |
+| **Minor** | Annotation, view labels | Presentation |
+| **Info** | Title block, revision letter, dates, approvers | Revision housekeeping |
+
+Classification is pattern-based rather than positional, because parts lists
+and title blocks sit in different places on every company's template but
+`ASTM F593C` looks like a material spec everywhere.
+
+### Parts list comparison
+
+The parts list is compared as a **table keyed on the item number**, not as
+free text. Rows 8, 9 and 10 of a fastener list read almost identically
+("FLAT WASHER, TYPE A, SERIES N, 1/4" vs "... 3/4"), so a similarity matcher
+pairs the wrong ones and a positional matcher breaks the moment a
+description wraps. Anchoring on the item number removes the ambiguity, and
+the report says which column moved:
+
+```
+BOM item 10 part number:    266635        -> 266673
+BOM item 10 specification:  ASME B18.22.1 -> ASME B18.21.1
+```
+
+Rows are recovered geometrically — cells of one row share a baseline,
+columns are read left to right — so no per-company template is needed.
+
+### Reports
+
+`structured_report.py` writes a controlled document, not a printout:
+document control (including **SHA-256 digests of both input PDFs**),
+executive summary, critical findings first, per-sheet detail, a sign-off
+block, and appendices recording the exact settings used and the tool's
+stated limitations. The digests are what make a report verifiable and a
+published result reproducible.
 
 ### Multi-page sheet matching
 
@@ -144,11 +198,26 @@ whole-set HTML/JSON downloads.
 6. ⏳ PDM/vault awareness — later, once (5) works
 7. ✅ Multi-page / whole-set comparison with automatic sheet matching
    (`page_matcher.py` + `pipeline.compare_documents`)
-8. ⏳ Packaging the UI as an installable Windows app (e.g. `pyinstaller` on
+8. ✅ Engineering classification with severity (`classify.py`)
+9. ✅ Item-anchored parts-list comparison (`bom.py`)
+10. ✅ Controlled-document reports with file digests (`provenance.py`,
+    `structured_report.py`)
+11. ⏳ Geometry precision — currently over-reports; see limitations below
+12. ⏳ SolidWorks COM path for true feature-level comparison
+13. ⏳ Packaging the UI as an installable Windows app (e.g. `pyinstaller` on
    the Streamlit app, or a proper SolidWorks task pane add-in once (5) is
    solid)
 
 ## Notes on accuracy / limitations (be upfront with yourself about these)
+
+- **Text comparison is solid; geometry is not yet.** On a validated Rev B to
+  Rev C pair, every critical finding was real and traceable to the ECO. The
+  geometry pass still over-reports — it indicates where to look, not what
+  changed. Treat Critical and the text categories as reportable; treat
+  Geometry as a hint.
+- **No accuracy figures are published yet.** Validation so far is one
+  drawing pair. Precision and recall against an engineer-labelled set across
+  multiple drafting standards is the work needed before any accuracy claim.
 
 - Vector extraction only works well if the PDF was generated directly from
   CAD (has real vector content). A scanned/rasterized PDF will fall back to

@@ -37,6 +37,7 @@ class Severity(str, Enum):
 
 
 class ChangeCategory(str, Enum):
+    BOM_ITEM = "Bill of materials"
     PART_SUBSTITUTION = "Part substitution"
     MATERIAL_SPEC = "Material / specification"
     QUANTITY = "Quantity"
@@ -51,6 +52,7 @@ class ChangeCategory(str, Enum):
 
 
 SEVERITY_OF: dict[ChangeCategory, Severity] = {
+    ChangeCategory.BOM_ITEM: Severity.CRITICAL,
     ChangeCategory.PART_SUBSTITUTION: Severity.CRITICAL,
     ChangeCategory.MATERIAL_SPEC: Severity.CRITICAL,
     ChangeCategory.QUANTITY: Severity.CRITICAL,
@@ -127,6 +129,29 @@ _FINISH_RE = re.compile(
     r"\bRa\s*\d|\bRMS\s*\d|\bRz\s*\d|µin|MICROINCH|SURFACE\s+FINISH", re.IGNORECASE
 )
 
+# --- bill of materials -------------------------------------------------
+# A parts-list row is recognised by its structure (item no. / part no. /
+# quantity / description) or by naming a component. Establishing that a
+# line belongs to the BOM has to happen before any value-level rule runs:
+# "5/8" inside "FLAT WASHER, TYPE A, SERIES N, 5/8" is a fastener size, not
+# a drawing dimension, and classifying it as one sends the reader hunting
+# the sheet for a dimension that was never there.
+_BOM_STRUCTURE_RE = re.compile(
+    r"^\s*\d{1,3}\s+[A-Z0-9][A-Z0-9\-/]{3,}\s+\d{1,4}\s+\S", re.IGNORECASE
+)
+_BOM_QTY_DESC_RE = re.compile(r"^\s*\d{1,4}\s+[A-Z]", re.IGNORECASE)
+_COMPONENT_RE = re.compile(
+    r"\b(?:WASHER|NUT|BOLT|SCREW|CAP\s*SCREW|RIVET|PIN|ROD|STUD|SPACER|"
+    r"BUSHING|BEARING|GASKET|SEAL|O-RING|CLIP|CLAMP|BRACKET|PLATE|SHIM|"
+    r"WLD|WELDMENT|ASSY|ASSEMBLY|STEP|TUBE|ANGLE|CHANNEL|BEAM|GDR|GIRDER|"
+    r"ITEMS?\s+LIST|PARTS?\s+LIST|BILL\s+OF\s+MATERIAL)\b",
+    re.IGNORECASE,
+)
+
+# Records produced by the structured parts-list comparator, which already
+# know their item number and column.
+_BOM_RECORD_RE = re.compile(r"^BOM item (\d+) ([a-z ]+):", re.IGNORECASE)
+
 # Quantity: a bare small integer, or an explicit QTY column.
 _QTY_RE = re.compile(r"\bQTY\b|\bQUANTITY\b", re.IGNORECASE)
 _BARE_INT_RE = re.compile(r"^\d{1,4}$")
@@ -171,6 +196,8 @@ class ClassifiedChange:
     category: ChangeCategory
     severity: Severity
     rationale: str
+    display_old: str | None = None
+    display_new: str | None = None
 
     @property
     def zone(self) -> str:
@@ -178,8 +205,8 @@ class ClassifiedChange:
 
     def describe(self) -> str:
         """One line an engineer can read without opening the drawing."""
-        old = (self.record.old_value or "").strip()
-        new = (self.record.new_value or "").strip()
+        old = (self.display_old or self.record.old_value or "").strip()
+        new = (self.display_new or self.record.new_value or "").strip()
         if old and new:
             return f"{old} \u2192 {new}"
         if new:
@@ -187,6 +214,60 @@ class ClassifiedChange:
         if old:
             return f"removed: {old}"
         return self.record.change_type.value
+
+
+def _is_bom_row(text: str) -> bool:
+    """True if this line reads like a parts-list entry."""
+    if not text:
+        return False
+    if _BOM_STRUCTURE_RE.match(text):
+        return True
+    if _COMPONENT_RE.search(text) and (
+        _BOM_QTY_DESC_RE.match(text) or text.count(",") >= 2
+    ):
+        return True
+    return bool(_COMPONENT_RE.search(text) and _STANDARD_RE.search(text))
+
+
+def _classify_bom_change(
+    record: DiffRecord, old: str, new: str, edited: set[str], edited_text: str
+) -> ClassifiedChange:
+    """
+    Sub-classify a change inside a parts-list row.
+
+    The row is already known to be BOM, so the question is only which
+    column moved: the part number, the quantity, the material or spec, or
+    the description itself.
+    """
+    old_parts = {p for p in _PART_NO_RE.findall(old.upper()) if any(c.isdigit() for c in p)}
+    new_parts = {p for p in _PART_NO_RE.findall(new.upper()) if any(c.isdigit() for c in p)}
+    swapped = {p for p in (old_parts ^ new_parts) if len(p) >= 5 and "." not in p}
+
+    old_std = _STANDARD_RE.findall(old)
+    new_std = _STANDARD_RE.findall(new)
+    if (old_std or new_std) and old_std != new_std:
+        return _make(
+            record,
+            ChangeCategory.MATERIAL_SPEC,
+            f"parts-list specification changed ({'/'.join(old_std + new_std)[:60]})",
+        )
+
+    if _MATERIAL_RE.search(edited_text) or any(_STANDARD_CODE_RE.match(t) for t in edited):
+        return _make(record, ChangeCategory.MATERIAL_SPEC, "parts-list material/grade changed")
+
+    if swapped:
+        return _make(
+            record,
+            ChangeCategory.PART_SUBSTITUTION,
+            f"parts-list part number changed ({', '.join(sorted(swapped))[:60]})",
+        )
+
+    old_qty = _BOM_QTY_DESC_RE.match(old)
+    new_qty = _BOM_QTY_DESC_RE.match(new)
+    if old_qty and new_qty and old.split()[0] != new.split()[0]:
+        return _make(record, ChangeCategory.QUANTITY, "parts-list quantity changed")
+
+    return _make(record, ChangeCategory.BOM_ITEM, "parts-list entry changed")
 
 
 def _tokens(*values: str | None) -> str:
@@ -213,54 +294,75 @@ def classify_record(record: DiffRecord) -> ClassifiedChange:
     new = _undouble((record.new_value or "").strip())
     both = _tokens(old, new)
 
+    def tag(category: ChangeCategory, rationale: str) -> ClassifiedChange:
+        return _make(record, category, rationale, display_old=old or None, display_new=new or None)
+
     if record.change_type in {
         ChangeType.GEOMETRY_ADDED,
         ChangeType.GEOMETRY_REMOVED,
         ChangeType.GEOMETRY_CHANGED,
     }:
-        return _make(record, ChangeCategory.GEOMETRY, "vector geometry difference")
+        return tag(ChangeCategory.GEOMETRY, "vector geometry difference")
 
     removed_frag, added_frag = _changed_fragments(old, new)
     edited = removed_frag | added_frag
     edited_text = " ".join(sorted(edited))
 
+    # Records emitted by the structured parts-list comparator name their
+    # own column, so they are classified from that rather than re-parsed.
+    bom_field = _BOM_RECORD_RE.match(old) or _BOM_RECORD_RE.match(new)
+    if bom_field:
+        column = bom_field.group(2).lower()
+        category = {
+            "part number": ChangeCategory.PART_SUBSTITUTION,
+            "quantity": ChangeCategory.QUANTITY,
+            "specification": ChangeCategory.MATERIAL_SPEC,
+            "material": ChangeCategory.MATERIAL_SPEC,
+        }.get(column, ChangeCategory.BOM_ITEM)
+        return _make(
+            record,
+            category,
+            f"parts-list item {bom_field.group(1)}, {column} column",
+            display_old=old or None,
+            display_new=new or None,
+        )
+
+    # Establish BOM context first. Everything inside a parts-list row is a
+    # BOM change of some kind, never a drawing dimension.
+    if _is_bom_row(old) or _is_bom_row(new):
+        bom = _classify_bom_change(record, old, new, edited, edited_text)
+        bom.display_old, bom.display_new = old or None, new or None
+        return bom
+
     # --- what actually changed inside the line ------------------------
     if _TOLERANCE_RE.search(edited_text) or (
         _TOLERANCE_RE.search(both) and _DIMENSION_RE.search(edited_text)
     ):
-        return _make(record, ChangeCategory.TOLERANCE, "tolerance notation changed")
+        return tag(ChangeCategory.TOLERANCE, "tolerance notation changed")
 
     if _FINISH_RE.search(both):
-        return _make(record, ChangeCategory.SURFACE_FINISH, "surface finish callout")
+        return tag(ChangeCategory.SURFACE_FINISH, "surface finish callout")
 
     # Standards usually share their prefix across revisions, so compare the
     # full strings rather than only the differing tokens.
     old_std = _STANDARD_RE.findall(old)
     new_std = _STANDARD_RE.findall(new)
     if (old_std or new_std) and old_std != new_std:
-        return _make(
-            record,
-            ChangeCategory.MATERIAL_SPEC,
-            f"specification standard changed ({'/'.join(old_std + new_std)[:60]})",
-        )
+        return tag(ChangeCategory.MATERIAL_SPEC, f"specification standard changed ({'/'.join(old_std + new_std)[:60]})")
     if any(_STANDARD_CODE_RE.match(t) for t in edited):
-        return _make(record, ChangeCategory.MATERIAL_SPEC, "specification code changed")
+        return tag(ChangeCategory.MATERIAL_SPEC, "specification code changed")
 
     if _MATERIAL_RE.search(edited_text):
-        return _make(
-            record,
-            ChangeCategory.MATERIAL_SPEC,
-            f"material/grade changed ({edited_text[:60]})",
-        )
+        return tag(ChangeCategory.MATERIAL_SPEC, f"material/grade changed ({edited_text[:60]})")
 
     if _DATE_RE.search(edited_text) or _ADDRESS_RE.search(edited_text) or _ADMIN_RE.search(both):
-        return _make(record, ChangeCategory.TITLE_BLOCK, "title block or revision housekeeping")
+        return tag(ChangeCategory.TITLE_BLOCK, "title block or revision housekeeping")
 
     if _NOTE_RE.search(old) or _NOTE_RE.search(new):
-        return _make(record, ChangeCategory.NOTE, "drawing note text changed")
+        return tag(ChangeCategory.NOTE, "drawing note text changed")
 
     if _VIEW_RE.search(both):
-        return _make(record, ChangeCategory.ANNOTATION, "view or detail label")
+        return tag(ChangeCategory.ANNOTATION, "view or detail label")
 
     # A part number that appears on exactly one side is a substitution.
     old_parts = {p for p in _PART_NO_RE.findall(old.upper()) if any(c.isdigit() for c in p)}
@@ -268,34 +370,38 @@ def classify_record(record: DiffRecord) -> ClassifiedChange:
     swapped = (old_parts - new_parts) | (new_parts - old_parts)
     long_swapped = {p for p in swapped if len(p) >= 5}
     if long_swapped and not _DIMENSION_RE.search(edited_text):
-        return _make(
-            record,
-            ChangeCategory.PART_SUBSTITUTION,
-            f"part number changed ({', '.join(sorted(long_swapped))[:60]})",
-        )
+        return tag(ChangeCategory.PART_SUBSTITUTION, f"part number changed ({', '.join(sorted(long_swapped))[:60]})")
 
     if _DIMENSION_RE.search(edited_text):
-        return _make(record, ChangeCategory.DIMENSION, "dimension value changed")
+        return tag(ChangeCategory.DIMENSION, "dimension value changed")
 
     if _QTY_RE.search(both) or (_BARE_INT_RE.match(old) and _BARE_INT_RE.match(new)):
-        return _make(record, ChangeCategory.QUANTITY, "quantity changed")
+        return tag(ChangeCategory.QUANTITY, "quantity changed")
 
     # Short alphanumeric tokens in a drawing are revision letters, drafter
     # initials, and approval marks — the title block's own bookkeeping.
     if old and new and len(old) <= 4 and len(new) <= 4:
-        return _make(record, ChangeCategory.TITLE_BLOCK, "revision letter or initials")
+        return tag(ChangeCategory.TITLE_BLOCK, "revision letter or initials")
     if (old or new) and len(old or new) <= 3:
-        return _make(record, ChangeCategory.TITLE_BLOCK, "revision letter or initials")
+        return tag(ChangeCategory.TITLE_BLOCK, "revision letter or initials")
 
-    return _make(record, ChangeCategory.UNCLASSIFIED, "no matching pattern")
+    return tag(ChangeCategory.UNCLASSIFIED, "no matching pattern")
 
 
-def _make(record: DiffRecord, category: ChangeCategory, rationale: str) -> ClassifiedChange:
+def _make(
+    record: DiffRecord,
+    category: ChangeCategory,
+    rationale: str,
+    display_old: str | None = None,
+    display_new: str | None = None,
+) -> ClassifiedChange:
     return ClassifiedChange(
         record=record,
         category=category,
         severity=SEVERITY_OF[category],
         rationale=rationale,
+        display_old=display_old,
+        display_new=display_new,
     )
 
 

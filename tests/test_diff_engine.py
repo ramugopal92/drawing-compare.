@@ -63,8 +63,19 @@ def test_unchanged_text_produces_no_record():
 
 
 def test_geometry_added_and_removed():
-    old_page = make_page(primitives=[VectorPrimitive(kind="line", bbox=(0, 0, 100, 0))])
-    new_page = make_page(primitives=[VectorPrimitive(kind="line", bbox=(0, 200, 100, 200))])
+    # Several primitives per side, not one: an isolated primitive is treated
+    # as noise (a hatch fragment, a rounding artifact) and deliberately not
+    # reported. Real edits move a cluster of geometry together.
+    old_page = make_page(primitives=[
+        VectorPrimitive(kind="line", bbox=(0, 0, 100, 0)),
+        VectorPrimitive(kind="line", bbox=(0, 2, 100, 2)),
+        VectorPrimitive(kind="line", bbox=(0, 4, 100, 4)),
+    ])
+    new_page = make_page(primitives=[
+        VectorPrimitive(kind="line", bbox=(0, 200, 100, 200)),
+        VectorPrimitive(kind="line", bbox=(0, 202, 100, 202)),
+        VectorPrimitive(kind="line", bbox=(0, 204, 100, 204)),
+    ])
 
     records = diff_pages(old_page, new_page, IDENTITY_ALIGNMENT)
     types = {r.change_type for r in records}

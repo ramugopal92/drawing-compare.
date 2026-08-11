@@ -29,13 +29,8 @@ from .diff_engine import DiffRecord, diff_pages
 from .classify import classify_records, summarize_by_severity
 from .page_matcher import MatchPlan, PagePair, match_pages
 from .pdf_io import PageData, load_pdf_page, scan_pdf_pages
-from .report import (
-    render_overlay,
-    save_html,
-    save_json,
-    save_multipage_html,
-    save_multipage_json,
-)
+from .report import render_overlay, save_html, save_json
+from .structured_report import save_structured_json, save_structured_report
 
 
 @dataclass
@@ -141,6 +136,9 @@ class DocumentCompareResult:
     new_pdf: Path
     plan: MatchPlan
     pages: list[PageComparison] = field(default_factory=list)
+    old_page_count: int = 0
+    new_page_count: int = 0
+    match_mode: str = "auto"
 
     @property
     def total_records(self) -> int:
@@ -181,11 +179,40 @@ class DocumentCompareResult:
             p for p in self.pages if p.result and not p.result.alignment.reliable
         ]
 
-    def to_html(self, path: str | Path) -> None:
-        save_multipage_html(self, path)
+    def to_html(self, path: str | Path, provenance=None, drawing_title: str | None = None) -> None:
+        """
+        Write the structured HTML report.
 
-    def to_json(self, path: str | Path) -> None:
-        save_multipage_json(self, path)
+        Provenance is built here if the caller didn't supply one, so a
+        report always carries file digests and settings even when produced
+        from a bare script.
+        """
+        save_structured_report(
+            self, provenance or self.build_provenance(), path, drawing_title=drawing_title
+        )
+
+    def to_json(self, path: str | Path, provenance=None) -> None:
+        save_structured_json(self, provenance or self.build_provenance(), path)
+
+    def build_provenance(self, **kwargs):
+        from .provenance import build_provenance
+
+        return build_provenance(
+            self.old_pdf,
+            self.new_pdf,
+            old_pages=self.old_page_count,
+            new_pages=self.new_page_count,
+            match_mode=self.match_mode,
+            **kwargs,
+        )
+
+    def drawing_title(self) -> str | None:
+        """Drawing identity read off the sheets, for titling the report."""
+        for pair in self.plan.pairs:
+            identity = pair.old_identity or pair.new_identity
+            if identity and identity.label():
+                return identity.label()
+        return None
 
 
 def compare_documents(
@@ -256,5 +283,11 @@ def compare_documents(
             comparisons.append(PageComparison(pair=pair, error=f"{type(exc).__name__}: {exc}"))
 
     return DocumentCompareResult(
-        old_pdf=old_pdf, new_pdf=new_pdf, plan=plan, pages=comparisons
+        old_pdf=old_pdf,
+        new_pdf=new_pdf,
+        plan=plan,
+        pages=comparisons,
+        old_page_count=len(old_summaries),
+        new_page_count=len(new_summaries),
+        match_mode=match_mode,
     )

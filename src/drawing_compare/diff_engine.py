@@ -33,6 +33,8 @@ from .config import (
     GEOMETRY_MAX_CLUSTER_DENSITY,
     TEXT_MASK_PADDING_PT,
     REPORT_LINE_WEIGHT_CHANGES,
+    TEXT_PAIR_FALLBACK_DISTANCE_PT,
+    TEXT_PAIR_FALLBACK_SIMILARITY,
     TEXT_PAIR_MAX_DISTANCE_PT,
     TEXT_FUZZY_MATCH_THRESHOLD,
     TEXT_POSITION_TOLERANCE_PT,
@@ -552,6 +554,8 @@ def diff_text(
     old_page: PageData,
     new_page: PageData,
     alignment: AlignmentResult,
+    skip_old: set[int] | None = None,
+    skip_new: set[int] | None = None,
 ) -> list[DiffRecord]:
     """
     Compare text between two pages, one row per changed line.
@@ -574,11 +578,16 @@ def diff_text(
 
     page_size = old_page.page_size_pt
     records: list[DiffRecord] = []
-    used_new: set[int] = set()
-    matched_old: set[int] = set()
+    # Lines already handled by a structured comparator (the parts list) are
+    # marked used so the same change is not reported twice, once as a table
+    # field and once as loose text.
+    used_new: set[int] = set(skip_new or ())
+    matched_old: set[int] = set(skip_old or ())
 
     identical: dict[str, list[int]] = {}
     for i, line in enumerate(new_lines):
+        if i in used_new:
+            continue
         identical.setdefault(line.text, []).append(i)
 
     for i, old_line in enumerate(old_lines):
@@ -651,6 +660,11 @@ def diff_text(
             d = _bbox_center_distance(old_lines[i].bbox, new_lines[j].bbox)
             if d <= TEXT_PAIR_MAX_DISTANCE_PT:
                 candidates.append((d, i, j))
+            elif d <= TEXT_PAIR_FALLBACK_DISTANCE_PT:
+                score = fuzz.ratio(old_lines[i].text, new_lines[j].text)
+                if score >= TEXT_PAIR_FALLBACK_SIMILARITY:
+                    # Rank behind every positional match, best wording first.
+                    candidates.append((TEXT_PAIR_MAX_DISTANCE_PT + (100 - score), i, j))
     for _, i, j in sorted(candidates, key=lambda t: t[0]):
         if i in matched_old or j in used_new:
             continue
@@ -703,10 +717,35 @@ def _aligned_bbox(bbox, alignment: AlignmentResult, dpi: int):
     return pixels_to_pdf_points(transformed_px, dpi)
 
 
+def group_text_lines(page: PageData) -> list[TextSpan]:
+    """Public accessor for the line grouping, shared with the BOM pass."""
+    return _group_spans_into_lines(page.text_spans)
+
+
 def diff_pages(
     old_page: PageData, new_page: PageData, alignment: AlignmentResult
 ) -> list[DiffRecord]:
-    records = []
+    """
+    Full comparison of one aligned sheet pair.
+
+    Runs structured comparators before general ones. The parts list is a
+    table with a primary key (the item number), so comparing it as a table
+    is both more accurate and more informative than letting the text differ
+    guess at which row is which; whatever it consumes is withheld from the
+    text pass so nothing is reported twice.
+    """
+    from .bom import diff_bom  # imported here to keep module import acyclic
+
+    records: list[DiffRecord] = []
     records.extend(diff_geometry(old_page, new_page, alignment))
-    records.extend(diff_text(old_page, new_page, alignment))
+
+    old_lines = group_text_lines(old_page)
+    new_lines = group_text_lines(new_page)
+    bom_records, used_old, used_new = diff_bom(
+        old_lines, new_lines, old_page.page_size_pt
+    )
+    records.extend(bom_records)
+    records.extend(
+        diff_text(old_page, new_page, alignment, skip_old=used_old, skip_new=used_new)
+    )
     return records

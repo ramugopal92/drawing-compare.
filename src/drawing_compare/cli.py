@@ -60,6 +60,18 @@ def main() -> None:
     parser.add_argument(
         "--out", type=str, default="report.html", help="Output HTML report path."
     )
+    parser.add_argument("--reviewer", type=str, default=None,
+                        help="Name recorded as 'Prepared by' in the report.")
+    parser.add_argument("--reference", type=str, default=None,
+                        help="ECO / ECN / project reference recorded in the report.")
+    parser.add_argument("--notes", type=str, default=None,
+                        help="Free-text note recorded in the report.")
+    parser.add_argument(
+        "--fail-on-critical", action="store_true",
+        help="Exit 1 only if a CRITICAL change is found (material, spec, part "
+             "number, quantity, dimension, tolerance). Better CI gate than "
+             "--fail-on-diff, which trips on a copyright year.",
+    )
     parser.add_argument(
         "--fail-on-diff", action="store_true",
         help="Exit with code 1 if any difference is found (for CI gating).",
@@ -88,6 +100,7 @@ def main() -> None:
         for change_type, count in sorted(result.summary().items()):
             print(f"  {change_type}: {count}")
         total = len(result.records)
+        critical_count = 0
     else:
         pairs = _parse_pairs(args.pairs) if args.pairs else None
 
@@ -101,8 +114,11 @@ def main() -> None:
             page_pairs=pairs,
             progress=progress,
         )
-        doc.to_html(out_path)
-        doc.to_json(json_path)
+        prov = doc.build_provenance(
+            reviewer=args.reviewer, reference=args.reference, notes=args.notes
+        )
+        doc.to_html(out_path, provenance=prov, drawing_title=doc.drawing_title())
+        doc.to_json(json_path, provenance=prov)
 
         print(f"\nSheet matching: {doc.plan.summary()}")
         for page in doc.pages:
@@ -119,13 +135,25 @@ def main() -> None:
             print(f"  {page.pair.label()}: {note}")
 
         print(f"\nTotal differences found: {doc.total_records}")
-        for change_type, count in sorted(doc.summary().items()):
-            print(f"  {change_type}: {count}")
+        severity = doc.severity_summary()
+        for name in ("Critical", "Major", "Minor", "Info"):
+            if severity.get(name):
+                print(f"  {name}: {severity[name]}")
+
+        critical = doc.critical_changes()
+        if critical:
+            print("\nCritical changes — affect what is made or bought:")
+            for label, change in critical:
+                print(f"  [{change.category.value}] {change.zone}: {change.describe()}")
+
         total = doc.total_records
+        critical_count = len(critical)
 
     print(f"\nHTML report: {out_path}")
     print(f"JSON report: {json_path}")
 
+    if args.fail_on_critical and not single_page and critical_count > 0:
+        sys.exit(1)
     if args.fail_on_diff and total > 0:
         sys.exit(1)
 
