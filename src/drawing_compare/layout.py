@@ -194,10 +194,17 @@ def detect_regions(
     Locate the title block, revision table, and parts list by their labels.
 
     Each is found by the words printed inside it, then given an extent that
-    covers the cluster of those words plus the text sitting with them. No
-    page fractions are assumed, so a company whose title block runs along
-    the bottom edge rather than the bottom-right corner is handled without
-    configuration.
+    covers the cluster of those words plus the text sitting close beside
+    them. No page fractions are assumed, so a company whose title block runs
+    along the bottom edge rather than the bottom-right corner is handled
+    without configuration.
+
+    The revision table gets a second pass: its data rows are usually well
+    below its own header labels — one row on an initial release, several
+    after a few revisions — so absorbing only what sits near the header
+    misses every row beyond the first. `_absorb_revision_rows` finds the
+    rows themselves, the same way the parts list is found: by their own
+    structural pattern, not by proximity to a label.
     """
     width, height = page_size
     radius = max(width, height) * 0.06
@@ -216,7 +223,6 @@ def detect_regions(
         if len(biggest) < 2 and name is TITLE_BLOCK:
             continue
         seed = _union([span.bbox for span in biggest])
-        # Grow the region to take in the values printed beside the labels.
         neighbours = [
             line.bbox
             for line in lines
@@ -231,7 +237,78 @@ def detect_regions(
             )
         )
 
+    for index, region in enumerate(regions):
+        if region.name == REVISION_TABLE:
+            regions[index] = _absorb_revision_rows(region, lines)
+
     return regions
+
+
+# A revision-letter cell: a single letter, optionally followed by a digit
+# ("A", "B", "A1"). The revision column is the narrowest and most reliably
+# isolated column in the table, which is why rows are found by it rather
+# than by the longer description text next to it.
+_REVISION_CELL_RE = re.compile(r"^[A-Z]\d?$")
+_REVISION_CELL_MAX_WIDTH_PT = 22.0
+
+
+def _absorb_revision_rows(region: Region, lines: list[TextSpan]) -> Region:
+    """
+    Extend a revision-table region to cover its actual data rows.
+
+    Candidate revision-letter cells are grouped by horizontal position, the
+    same way BOM item numbers are, and only the group whose column sits
+    within reach of the table's header labels is accepted — a revision
+    letter can appear elsewhere on the sheet (inside a balloon, in the
+    drawing number) and must not pull in unrelated geometry.
+    """
+    candidates = [
+        line
+        for line in lines
+        if _REVISION_CELL_RE.match(line.text.strip())
+        and (line.bbox[2] - line.bbox[0]) <= _REVISION_CELL_MAX_WIDTH_PT
+    ]
+    if not candidates:
+        return region
+
+    by_column: dict[int, list[TextSpan]] = {}
+    for line in candidates:
+        key = int(round(line.bbox[0] / 6.0))
+        by_column.setdefault(key, []).append(line)
+
+    reach = 60.0
+    best_column: list[TextSpan] | None = None
+    for column in by_column.values():
+        if len(column) < 1:
+            continue
+        column_x = sum(l.bbox[0] for l in column) / len(column)
+        if region.bbox[0] - reach <= column_x <= region.bbox[2] + reach:
+            if best_column is None or len(column) > len(best_column):
+                best_column = column
+
+    if not best_column:
+        return region
+
+    # Each revision-letter cell anchors one data row; absorb everything on
+    # its baseline to the right of it, the same way a BOM row is read.
+    row_boxes = [region.bbox]
+    for letter_cell in best_column:
+        baseline = letter_cell.bbox[1]
+        row = [letter_cell.bbox] + [
+            line.bbox
+            for line in lines
+            if line is not letter_cell
+            and abs(line.bbox[1] - baseline) <= 4.0
+            and line.bbox[0] > letter_cell.bbox[0]
+        ]
+        row_boxes.append(_union(row))
+
+    grown = _union(row_boxes)
+    return Region(
+        name=region.name,
+        bbox=grown,
+        evidence=region.evidence + f"; {len(best_column)} revision row(s) absorbed",
+    )
 
 
 def detect_views(lines: list[TextSpan]) -> list[View]:

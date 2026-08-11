@@ -160,3 +160,26 @@ def test_pairs_are_ordered_by_new_document_position():
     plan = match_pages(old, new, mode="auto")
     new_order = [p.new_index for p in plan.pairs if p.new_index is not None]
     assert new_order == sorted(new_order)
+
+
+def test_fallback_drawing_number_excludes_phone_numbers():
+    """Regression: the phone-number exclusion here is a safety net for when
+    the primary label-anchored reader (layout.py) finds nothing. It must
+    never let a ten-digit phone number outscore a real drawing number just
+    because it is longer."""
+    page = PageSummary(
+        0, (1224.0, 792.0), text="", title_block_text="",
+        text_tokens=[], title_block_tokens=["442079-FAB", "1-604-273-1068"],
+    )
+    assert extract_identity(page).drawing_number == "442079-FAB"
+
+
+def test_fallback_does_not_reject_hyphenated_drawing_numbers():
+    """The exclusion keys on digit COUNT (phone-number length), not on the
+    mere presence of hyphens — otherwise ordinary drawing numbers like
+    '12345-678' are excluded too."""
+    page = PageSummary(
+        0, (1224.0, 792.0), text="", title_block_text="",
+        text_tokens=[], title_block_tokens=["DWG", "NO", "12345-678"],
+    )
+    assert extract_identity(page).drawing_number == "12345-678"

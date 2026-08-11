@@ -40,6 +40,31 @@ _SHEET_BARE_RE = re.compile(r"\bSH(?:EET|T|\.)?\s*[:.]?\s*(\d{1,3})\b", re.IGNOR
 # Drawing/part numbers: 3+ chars, digits with separators, e.g. 12345-678, A-1024_B
 _DRAWING_NO_RE = re.compile(r"\b(?=[A-Z0-9][A-Z0-9\-_/]{4,})(?=.*\d)[A-Z0-9\-_/]{5,}\b")
 
+# Excludes phone numbers, dates, and postal codes from the drawing-number
+# guess. This is a secondary path (layout.extract_title_block_fields is the
+# primary, label-anchored reader) — kept as a safety net so that if the
+# primary reader ever returns nothing, this one cannot silently regress to
+# reporting a phone number as the drawing identity, as it did before this
+# guard existed.
+# Phone numbers specifically, not any digit-and-hyphen string — an ordinary
+# drawing number like "12345-678" is also all digits and hyphens, so the
+# exclusion has to key on what makes a phone number recognisable: ten or
+# more digits in total, which a typical drawing number does not reach.
+def _looks_like_phone_number(token: str) -> bool:
+    digits = sum(c.isdigit() for c in token)
+    return digits >= 10 and bool(re.match(r"^\+?[\d\-\s()]+$", token))
+
+
+_NOT_A_DRAWING_NUMBER_DATE_OR_ZIP = re.compile(
+    r"^(?:\d{4}-\d{2}-\d{2}|[A-Z]\d[A-Z]\s*\d[A-Z]\d)$", re.IGNORECASE
+)
+
+
+def _not_a_drawing_number(token: str) -> bool:
+    return _looks_like_phone_number(token) or bool(
+        _NOT_A_DRAWING_NUMBER_DATE_OR_ZIP.match(token)
+    )
+
 # Below this Jaccard score we refuse to call two pages the same sheet.
 CONTENT_MATCH_THRESHOLD = 0.40
 
@@ -148,7 +173,9 @@ def extract_identity(summary: PageSummary) -> SheetIdentity:
 
     drawing_number = None
     tb_text = summary.title_block_text.upper() or " ".join(summary.title_block_tokens).upper()
-    candidates = _DRAWING_NO_RE.findall(tb_text)
+    candidates = [
+        c for c in _DRAWING_NO_RE.findall(tb_text) if not _not_a_drawing_number(c)
+    ]
     if candidates:
         # Longest candidate is the most specific — favours "12345-678-A"
         # over the "12345" that a looser pattern would also match.
