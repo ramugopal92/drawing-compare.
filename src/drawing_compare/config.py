@@ -126,6 +126,12 @@ DUAL_DIMENSION_AGGREGATE_THRESHOLD = 8
 # exporter, and joining them with a space produces "5 2 4 . 5 4".
 GLYPH_JOIN_GAP_RATIO = 0.10
 
+# Spans further apart than this fraction of the font height are in different
+# table cells. Word spacing inside a cell measures ~0.3 of the font height;
+# the gap between columns is several times that, so the threshold separates
+# them cleanly on both of the PDF text extractors tested.
+CELL_JOIN_GAP_RATIO = 1.2
+
 # Geometry differences from a PDF can say where something changed but not
 # what it changed from or to — "3 lines (15 x 13 pt)" is not something an
 # engineer can verify or act on. They are off by default and summarised as

@@ -330,14 +330,19 @@ def compare_documents(
 
     title_block = None
     try:
-        from .diff_engine import group_text_lines
+        from .diff_engine import group_text_cells, group_text_lines
         from .layout import analyse_sheet, extract_title_block_fields
         from .pdf_io import load_pdf_page
 
         first = load_pdf_page(new_pdf, 0)
+        # Raw spans, not grouped lines: grouping merges a title-block label
+        # with the value beside it, and the label-anchored lookup then has
+        # nothing to anchor to.
         lines = group_text_lines(first)
         title_block = extract_title_block_fields(
-            lines, analyse_sheet(lines, first.page_size_pt)
+            group_text_cells(first),
+            analyse_sheet(lines, first.page_size_pt),
+            lines=lines,
         )
     except Exception:
         title_block = None

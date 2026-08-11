@@ -33,6 +33,7 @@ from .config import (
     GEOMETRY_MATCH_TOLERANCE_PT,
     GEOMETRY_MIN_CLUSTER_PRIMITIVES,
     DUAL_DIMENSION_AGGREGATE_THRESHOLD,
+    CELL_JOIN_GAP_RATIO,
     GLYPH_JOIN_GAP_RATIO,
     REPORT_GEOMETRY_CHANGES,
     REPORT_TEXT_MOVES,
@@ -833,6 +834,63 @@ def group_text_lines(page: PageData) -> list[TextSpan]:
     return _group_spans_into_lines(page.text_spans)
 
 
+def group_text_cells(page: PageData) -> list[TextSpan]:
+    """
+    Group spans into table cells rather than whole lines.
+
+    This is the primitive that structured readers need. Raw spans are
+    unusable because some exports emit text one character at a time; whole
+    lines are unusable because they merge a table row into one string and
+    destroy the column boundaries. A cell sits between the two: words joined
+    at ordinary word spacing, columns left apart because the gap between
+    them is several times larger.
+
+    Getting this wrong is what made the parts-list reader work against one
+    PDF library and silently fail against another.
+    """
+    spans = [s for s in page.text_spans if s.text.strip()]
+    if not spans:
+        return []
+
+    ordered = sorted(spans, key=lambda s: (round(s.bbox[1], 1), s.bbox[0]))
+    cells: list[list[TextSpan]] = []
+    current = [ordered[0]]
+
+    for span in ordered[1:]:
+        previous = current[-1]
+        height = max(previous.bbox[3] - previous.bbox[1], 1.0)
+        same_baseline = abs(span.bbox[1] - previous.bbox[1]) <= height * 0.6
+        gap = span.bbox[0] - previous.bbox[2]
+        if same_baseline and -height <= gap <= height * CELL_JOIN_GAP_RATIO:
+            current.append(span)
+        else:
+            cells.append(current)
+            current = [span]
+    cells.append(current)
+
+    merged: list[TextSpan] = []
+    for group in cells:
+        pieces: list[str] = []
+        for position, span in enumerate(group):
+            if position:
+                previous = group[position - 1]
+                height = max(previous.bbox[3] - previous.bbox[1], 1.0)
+                if span.bbox[0] - previous.bbox[2] > height * GLYPH_JOIN_GAP_RATIO:
+                    pieces.append(" ")
+            pieces.append(span.text)
+        text = "".join(pieces).strip()
+        if not text:
+            continue
+        merged.append(
+            TextSpan(
+                text=text,
+                bbox=_union_bbox([s.bbox for s in group]),
+                font_size=max(s.font_size for s in group),
+            )
+        )
+    return merged
+
+
 def diff_pages(
     old_page: PageData, new_page: PageData, alignment: AlignmentResult
 ) -> list[DiffRecord]:
@@ -856,7 +914,15 @@ def diff_pages(
     # own extent. The extracted rows give the table's real footprint, so a
     # change anywhere in the table is attributed to it rather than to the
     # title block it usually sits beside.
-    rows, _, _ = extract_bom_rows(old_lines)
+    # Parts-list and title-block structure are read from RAW SPANS, never
+    # from grouped lines. Line grouping merges a table row into one string,
+    # which destroys the cell boundaries that tell a description from a cut
+    # length — and different PDF extractors merge differently, so anything
+    # built on grouped lines works with one library and silently fails with
+    # another.
+    old_cells = group_text_cells(old_page)
+    new_cells = group_text_cells(new_page)
+    rows, _, _ = extract_bom_rows(old_cells)
     if rows:
         table = _union_bbox([row.bbox for row in rows])
         layout.regions = [r for r in layout.regions if r.name != PARTS_LIST]
@@ -868,9 +934,14 @@ def diff_pages(
     if REPORT_GEOMETRY_CHANGES:
         records.extend(diff_geometry(old_page, new_page, alignment))
 
-    bom_records, used_old, used_new = diff_bom(
-        old_lines, new_lines, old_page.page_size_pt
+    bom_records, used_old_lines, used_new_lines = diff_bom(
+        old_cells,
+        new_cells,
+        old_page.page_size_pt,
+        old_lines=old_lines,
+        new_lines=new_lines,
     )
+    used_old, used_new = used_old_lines, used_new_lines
     records.extend(bom_records)
     records.extend(
         diff_text(old_page, new_page, alignment, skip_old=used_old, skip_new=used_new)

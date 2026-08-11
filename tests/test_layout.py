@@ -27,7 +27,7 @@ def title_block_lines() -> list[TextSpan]:
         span("TITLE", 800.0, 700.0),
         span("WLD, GDR, BRG, 4 STEP", 800.0, 714.0),
         span("REVISION", 1140.0, 700.0),
-        span("B", 1140.0, 714.0),
+        span("B", 1142.0, 714.0, 8.0),
         span("SCALE", 900.0, 740.0),
         span("1:24", 900.0, 754.0),
         span("DRAWN BY", 700.0, 700.0),

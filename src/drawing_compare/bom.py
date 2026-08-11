@@ -168,8 +168,21 @@ def _header_band(lines: list[TextSpan], rows_bbox) -> list[TextSpan]:
     if not by_baseline:
         return []
 
-    key, band = max(by_baseline.items(), key=lambda item: len(item[1]))
-    if len(band) < 3:
+    # Score each candidate baseline by how many of its cells actually name a
+    # column. Counting cells alone picks whichever line happens to have the
+    # most words — a drawing note beside the table wins every time.
+    def header_score(group: list[TextSpan]) -> tuple[int, int]:
+        seen: set[str] = set()
+        hits = 0
+        for span in sorted(group, key=lambda s: s.bbox[0]):
+            name = _classify_header_cell(span.text, seen)
+            if name:
+                seen.add(name)
+                hits += 1
+        return hits, len(group)
+
+    key, band = max(by_baseline.items(), key=lambda item: header_score(item[1]))
+    if header_score(band)[0] < 3:
         return []
 
     baseline = sum(line.bbox[1] for line in band) / len(band)
@@ -625,9 +638,11 @@ def _parse_columns(row: BomRow) -> None:
 
 
 def diff_bom(
-    old_lines: list[TextSpan],
-    new_lines: list[TextSpan],
+    old_spans: list[TextSpan],
+    new_spans: list[TextSpan],
     page_size: tuple[float, float],
+    old_lines: list[TextSpan] | None = None,
+    new_lines: list[TextSpan] | None = None,
 ) -> tuple[list[DiffRecord], set[int], set[int]]:
     """
     Compare two parts lists, matched on item number.
@@ -641,10 +656,16 @@ def diff_bom(
     Returns the differences plus the line indices consumed on each side, so
     the general text diff can skip them.
     """
-    old_rows, old_used, old_header = extract_bom_rows(old_lines)
-    new_rows, new_used, new_header = extract_bom_rows(new_lines)
+    old_rows, _, old_header = extract_bom_rows(old_spans)
+    new_rows, _, new_header = extract_bom_rows(new_spans)
     if not old_rows and not new_rows:
         return [], set(), set()
+
+    # Rows are found in span space; the text diff works in line space, so
+    # the lines covered by the table are marked used by geometry rather
+    # than by index.
+    old_used = _lines_within(old_lines, old_rows)
+    new_used = _lines_within(new_lines, new_rows)
 
     records: list[DiffRecord] = []
     table_bbox = _union([row.bbox for row in (old_rows or new_rows)])
@@ -766,6 +787,25 @@ _FIELD_LABELS = {
 def _field_label(name: str) -> str:
     """Internal column name to the wording used in a report row."""
     return _FIELD_LABELS.get(name, name.replace("_", " "))
+
+
+def _lines_within(lines: list[TextSpan] | None, rows: list[BomRow]) -> set[int]:
+    """Indices of grouped lines that fall inside the parts-list table.
+
+    The table is located in span space, so the general text diff is told
+    which of its own lines to skip by intersecting with the row boxes —
+    otherwise every parts-list row is reported twice, once as a table field
+    and once as loose text."""
+    if not lines or not rows:
+        return set()
+    table = _union([row.bbox for row in rows])
+    used: set[int] = set()
+    for index, line in enumerate(lines):
+        cx = (line.bbox[0] + line.bbox[2]) / 2.0
+        cy = (line.bbox[1] + line.bbox[3]) / 2.0
+        if table[0] <= cx <= table[2] and table[1] <= cy <= table[3]:
+            used.add(index)
+    return used
 
 
 def _same_value(before: str | None, after: str | None) -> bool:

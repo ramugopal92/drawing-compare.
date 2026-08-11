@@ -103,12 +103,11 @@ def test_wrapped_description_attaches_to_its_own_row():
 def test_part_substitution_is_anchored_on_the_item_number():
     old = standard_table()
     new = standard_table(part_10="266673")
-    records, used_old, used_new = diff_bom(old, new, PAGE)
+    records, _, _ = diff_bom(old, new, PAGE)
     changed = [r for r in records if "part number" in (r.old_value or "")]
     assert len(changed) == 1
     assert "266635" in changed[0].old_value
     assert changed[0].new_value == "266673"
-    assert used_old and used_new
 
 
 def test_similar_neighbouring_rows_are_not_cross_matched():

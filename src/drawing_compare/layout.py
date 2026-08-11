@@ -324,6 +324,15 @@ _FIELD_LABELS: dict[str, tuple[str, ...]] = {
 }
 
 # Values that are never a drawing number, however much they look like one.
+# Other captions printed in a title block. They are not values, so they must
+# never be collected as one.
+_OTHER_CAPTION_RE = re.compile(
+    r"^(?:DRAWN\s*BY|CHECKED\s*BY|APPROVED\s*BY|DESIGNED\s*BY|DATE|MATERIAL|"
+    r"FINISH|WEIGHT|PROJECTION|THIRD\s*ANGLE|FIRST\s*ANGLE|OF|SHEET|"
+    r"DWG\s*CATEGORY|TOLERANCES\s*ARE|APVD|MOD\s*BY|EC-?ID)$",
+    re.IGNORECASE,
+)
+
 _NOT_A_DRAWING_NUMBER = re.compile(
     r"^(?:\+?\d[\d\-\s()]{7,}"          # phone numbers
     r"|\d{4}-\d{2}-\d{2}"               # dates
@@ -383,56 +392,80 @@ class TitleBlockFields:
 
 
 def _value_beside(
-    label: TextSpan, lines: list[TextSpan], max_gap: float = 200.0
+    label: TextSpan,
+    candidates: list[TextSpan],
+    min_length: int = 1,
+    max_gap: float = 200.0,
 ) -> str | None:
     """
     The value belonging to a title-block label.
 
-    Templates place the value either to the right of its label on the same
-    baseline, or directly underneath it. Both are tried, nearest first,
-    which is far more dependable than pattern-matching the whole title-block
-    region — the region also contains a phone number, a postal code, and
-    several standards designations, any of which can out-score the real
-    drawing number.
+    Templates put the value directly beneath its label or to the right of it
+    on the same baseline. Two things make this fiddly. A value is usually
+    wider than the label captioning it, so requiring the value to sit inside
+    the label's span finds nothing; and a value arrives as several spans
+    ("WLD," "GDR," "BRG,"), so taking the nearest single span returns a
+    fragment. Both are handled by collecting the whole baseline below the
+    label and joining it.
     """
     height = max(label.bbox[3] - label.bbox[1], 6.0)
+    label_centre_x = (label.bbox[0] + label.bbox[2]) / 2.0
     label_centre_y = (label.bbox[1] + label.bbox[3]) / 2.0
 
     def is_a_label(text: str) -> bool:
         cleaned = re.sub(r"\s+", " ", text.strip().upper())
-        return any(cleaned in names for names in _FIELD_LABELS.values())
+        if any(cleaned in names for names in _FIELD_LABELS.values()):
+            return True
+        return bool(_OTHER_CAPTION_RE.match(cleaned))
 
-    # Directly beneath the label is the commonest arrangement — the label
-    # captions a boxed cell — so it is tried first.
+    def overlaps(span: TextSpan) -> bool:
+        return span.bbox[2] > label.bbox[0] - 4 and span.bbox[0] < label.bbox[2] + 4
+
     below = [
-        line
-        for line in lines
-        if line is not label
-        and 0 < line.bbox[1] - label.bbox[3] <= height * 2.6
-        and line.bbox[0] < label.bbox[2] + 40
-        and line.bbox[2] > label.bbox[0] - 10
-        and not is_a_label(line.text)
+        span
+        for span in candidates
+        if span is not label
+        and 0 < span.bbox[1] - label.bbox[3] <= height * 2.6
+        and span.text.strip()
+        and not is_a_label(span.text)
+        and overlaps(span)
     ]
     if below:
-        return min(below, key=lambda l: l.bbox[1]).text.strip()
+        # Nearest baseline under the label, then everything printed on it
+        # within reach — that is the cell's full contents.
+        baseline = min(span.bbox[1] for span in below)
+        row = [
+            span
+            for span in candidates
+            if abs(span.bbox[1] - baseline) <= height * 0.6
+            and abs(((span.bbox[0] + span.bbox[2]) / 2.0) - label_centre_x)
+            <= max(50.0, (label.bbox[2] - label.bbox[0]) * 1.5)
+            and span.text.strip()
+            and not is_a_label(span.text)
+        ]
+        value = " ".join(span.text.strip() for span in sorted(row, key=lambda s: s.bbox[0]))
+        value = re.sub(r"\s+", " ", value).strip()
+        if len(value) >= min_length:
+            return value
 
-    # Otherwise the value sits to the right on the same baseline. Another
-    # label to the right is the next cell's caption, not this cell's value.
     to_right = [
-        line
-        for line in lines
-        if line is not label
-        and abs(((line.bbox[1] + line.bbox[3]) / 2.0) - label_centre_y) <= height * 0.7
-        and 0 <= line.bbox[0] - label.bbox[2] <= max_gap
-        and not is_a_label(line.text)
+        span
+        for span in candidates
+        if span is not label
+        and abs(((span.bbox[1] + span.bbox[3]) / 2.0) - label_centre_y) <= height * 0.7
+        and 0 <= span.bbox[0] - label.bbox[2] <= max_gap
+        and len(span.text.strip()) >= min_length
+        and not is_a_label(span.text)
     ]
     if to_right:
-        return min(to_right, key=lambda l: l.bbox[0]).text.strip()
+        return min(to_right, key=lambda s: s.bbox[0]).text.strip()
     return None
 
 
 def extract_title_block_fields(
-    lines: list[TextSpan], layout: SheetLayout | None = None
+    spans: list[TextSpan],
+    layout: SheetLayout | None = None,
+    lines: list[TextSpan] | None = None,
 ) -> TitleBlockFields:
     """
     Read the title block by its own labels.
@@ -442,13 +475,22 @@ def extract_title_block_fields(
     number is longer and equally digit-bearing, so any "longest plausible
     token wins" rule picks it every time.
     """
+    # Labels are matched against grouped lines, because a multi-word label
+    # like "DRAWING NO" arrives as two separate spans. Values are looked up
+    # among the raw spans, because grouping merges a value with whatever
+    # sits beside it. Using one or the other alone fails on one of the two.
+    label_source = lines if lines is not None else spans
+    value_source = spans
+
     region = None
     if layout is not None:
         region = next((r for r in layout.regions if r.name == TITLE_BLOCK), None)
 
-    candidates = lines
+    candidates = label_source
+    values = value_source
     if region is not None:
-        candidates = [line for line in lines if region.contains(line.bbox)] or lines
+        candidates = [l for l in label_source if region.contains(l.bbox)] or label_source
+        values = [s for s in value_source if region.contains(s.bbox)] or value_source
 
     fields = TitleBlockFields()
     for attribute, labels in _FIELD_LABELS.items():
@@ -456,11 +498,35 @@ def extract_title_block_fields(
             text = re.sub(r"\s+", " ", line.text.strip().upper())
             if text not in labels:
                 continue
-            value = _value_beside(line, candidates)
+            # A drawing number, title or scale is never a single character;
+            # the sheet border's own reference digits are.
+            minimum = 1 if attribute in {"revision", "size"} else 3
+            value = _value_beside(line, values, min_length=minimum)
             if not value:
                 continue
             value = _undouble_text(value)
             if attribute == "drawing_number":
+                # The value baseline can carry a neighbouring cell's text
+                # ("DATE B 409730-IASSY"); keep only the token that looks
+                # like a drawing number.
+                words = value.split()
+                tokens = [
+                    t
+                    for t in words
+                    if _DRAWING_NO_CANDIDATE_RE.match(t.upper())
+                    and not _NOT_A_DRAWING_NUMBER.match(t)
+                ]
+                if tokens:
+                    chosen = max(tokens, key=len)
+                    # A lone letter printed straight after the number is the
+                    # revision, from a template whose revision cell abuts the
+                    # drawing-number cell.
+                    position = words.index(chosen)
+                    if position + 1 < len(words):
+                        follower = words[position + 1]
+                        if re.fullmatch(r"[A-Z]\d?", follower) and fields.revision is None:
+                            fields.revision = follower
+                    value = chosen
                 if _NOT_A_DRAWING_NUMBER.match(value):
                     continue
                 # Templates that place the revision cell hard against the
@@ -476,4 +542,34 @@ def extract_title_block_fields(
             setattr(fields, attribute, value)
             break
 
+    if fields.drawing_number is None:
+        fields.drawing_number = _best_drawing_number(candidates)
     return fields
+
+
+_DRAWING_NO_CANDIDATE_RE = re.compile(r"^(?=[A-Z0-9\-/]*\d)[A-Z0-9]{3,}(?:[\-/][A-Z0-9]+)+$")
+
+
+def _best_drawing_number(cells: list[TextSpan]) -> str | None:
+    """
+    Fall back to the most drawing-number-like token in the title block.
+
+    Used when the label-anchored lookup finds nothing, which happens on
+    templates that box the value away from its caption. Exclusions do the
+    real work here: the title block also holds a phone number, a postal
+    code, a web address and several standards designations, and any
+    "longest token wins" rule picks one of those instead.
+    """
+    seen: dict[str, int] = {}
+    for cell in cells:
+        token = cell.text.strip().upper()
+        if not _DRAWING_NO_CANDIDATE_RE.match(token):
+            continue
+        if _NOT_A_DRAWING_NUMBER.match(token):
+            continue
+        seen[token] = seen.get(token, 0) + 1
+    if not seen:
+        return None
+    # A drawing number is repeated on every sheet of the set — in the title
+    # block and often in a corner stamp — so frequency is good evidence.
+    return max(seen.items(), key=lambda item: (item[1], len(item[0])))[0]

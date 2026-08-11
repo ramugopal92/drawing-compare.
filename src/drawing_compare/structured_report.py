@@ -104,13 +104,19 @@ def _where(change: ClassifiedChange) -> str:
     at before they look.
     """
     record = change.record
+    zone = f"zone {record.zone}" if record.zone and record.zone != "sheet" else "whole sheet"
     view = getattr(record, "view", None)
     if view:
-        return f"{view} ({record.zone})"
+        return f"{view} — {zone}"
     region = getattr(record, "region", None)
-    if region and region != "drawing_body":
-        return f"{region.replace('_', ' ')} ({record.zone})"
-    return record.zone
+    labels = {
+        "title_block": "Title block",
+        "revision_table": "Revision table",
+        "parts_list": "Parts list",
+    }
+    if region in labels:
+        return f"{labels[region]} — {zone}"
+    return zone
 
 
 def _view_inventory_section(doc_result) -> str:
@@ -221,7 +227,7 @@ def _critical_section(items: list[tuple[str, ClassifiedChange]]) -> str:
     <p class="sub" style="margin-bottom:6px">Changes that alter the part as made or
     bought — materials, specifications, part numbers, quantities, dimensions and
     tolerances.</p>
-    <table><thead><tr><th style="width:36px">#</th><th>Sheet</th><th style="width:130px">Where</th>
+    <table><thead><tr><th style="width:36px">#</th><th>Sheet</th><th style="width:170px">Where</th>
     <th style="width:150px">Category</th><th>Was</th><th>Is now</th></tr></thead>
     <tbody>{rows}</tbody></table>"""
 
@@ -257,7 +263,7 @@ def _change_table(classified: list[ClassifiedChange]) -> str:
     )
     return (
         trunc
-        + '<table><thead><tr><th style="width:36px">#</th><th style="width:130px">Where</th>'
+        + '<table><thead><tr><th style="width:36px">#</th><th style="width:170px">Where</th>'
         '<th style="width:150px">Category</th><th>Was</th><th>Is now</th>'
         '<th style="width:120px">Evidence</th>'
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
