@@ -152,6 +152,22 @@ prov.new_file.name = new_file.name
 
 # -------------------------------------------------------------- findings
 st.markdown("---")
+
+revision = doc.revision_summary()
+if any(revision.values()):
+    st.subheader("Revision summary")
+    r1, r2, r3 = st.columns([2, 1, 1])
+    r1.metric("Drawing", revision.get("drawing_number") or "—")
+    r2.metric("Previous revision", revision.get("previous_revision") or "—")
+    r3.metric("Current revision", revision.get("current_revision") or "—")
+    if revision.get("title"):
+        st.caption(revision["title"])
+    if revision.get("revision_description"):
+        st.info(
+            f"Revision block states: **{revision['revision_description']}**  \n"
+            "The findings below are what the comparison detected independently."
+        )
+
 st.subheader("Findings")
 
 sev = doc.severity_summary()
@@ -228,25 +244,39 @@ else:
                     f"Alignment unreliable ({result.alignment.good_matches} matched "
                     "features). Verify these differences manually."
                 )
-            left, right = st.columns([3, 2])
-            with left:
-                st.image(
-                    cv2.cvtColor(result.overlay_image, cv2.COLOR_BGR2RGB),
-                    caption="Baseline sheet with changes highlighted",
-                    use_container_width=True,
-                )
-                ok, buf = cv2.imencode(".png", result.overlay_image)
-                if ok:
-                    st.download_button(
-                        "Download full-resolution overlay",
-                        data=buf.tobytes(),
-                        file_name=f"{page.pair.label().replace(' ', '_')}_overlay.png",
-                        mime="image/png",
-                        key=f"overlay_dl_{page.pair.old_index}_{page.pair.new_index}",
-                        help="Opens at full resolution in your image viewer, "
-                        "where you can zoom — the preview above is scaled to fit.",
+            # Both revisions marked in the same places, side by side, so a
+            # reviewer can see what replaced what rather than only where to
+            # look.
+            old_col, new_col = st.columns(2)
+            for column, caption, image, tag in (
+                (old_col, "Baseline revision (old)", result.overlay_image, "old"),
+                (new_col, "Compared revision (new)",
+                 getattr(result, "new_overlay_image", None), "new"),
+            ):
+                if image is None:
+                    continue
+                with column:
+                    st.image(
+                        cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
+                        caption=caption,
+                        use_container_width=True,
                     )
-            with right:
+                    ok, buf = cv2.imencode(".png", image)
+                    if ok:
+                        st.download_button(
+                            f"Download {tag} sheet (full resolution)",
+                            data=buf.tobytes(),
+                            file_name=(
+                                f"{page.pair.label().replace(' ', '_')}_{tag}.png"
+                            ),
+                            mime="image/png",
+                            key=f"dl_{tag}_{page.pair.old_index}_{page.pair.new_index}",
+                            help="Opens at full resolution, where it can be zoomed — "
+                            "the preview above is scaled to fit.",
+                            use_container_width=True,
+                        )
+
+            with st.expander("Difference list for this sheet", expanded=True):
                 st.dataframe(
                     pd.DataFrame(
                         [
@@ -264,10 +294,15 @@ else:
                             for c in classify_records(result.records)
                         ]
                     ),
-                    hide_index=True, use_container_width=True, height=460,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=460,
+                    # The table sits full width beneath the sheets rather than
+                    # squeezed beside them; "Is now" was being clipped off the
+                    # right edge of a narrow column with no way to scroll to it.
                     column_config={
-                        "Was": st.column_config.TextColumn(width="medium"),
-                        "Is now": st.column_config.TextColumn(width="medium"),
+                        "Was": st.column_config.TextColumn(width="large"),
+                        "Is now": st.column_config.TextColumn(width="large"),
                     },
                 )
 

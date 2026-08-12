@@ -41,6 +41,50 @@ def render_overlay(
     return overlay
 
 
+def render_new_overlay(
+    new_raster: np.ndarray,
+    records: list[DiffRecord],
+    alignment,
+    dpi: int,
+) -> np.ndarray:
+    """
+    Draw the same change boxes on the NEW sheet.
+
+    A reviewer comparing revisions wants both sides marked in the same
+    places: the old sheet showing what was there, the new one showing what
+    replaced it. Boxes are stored in the old sheet's coordinate space (the
+    alignment maps new onto old), so they are mapped back through the
+    inverse homography to land correctly on the new raster.
+    """
+    overlay = new_raster.copy()
+    inverse = None
+    matrix = getattr(alignment, "homography", None)
+    if matrix is not None:
+        try:
+            inverse = np.linalg.inv(np.asarray(matrix, dtype=float))
+        except Exception:
+            inverse = None
+
+    for rec in records:
+        bbox_px = pdf_points_to_pixels(rec.bbox, dpi)
+        x0, y0, x1, y1 = (float(v) for v in bbox_px)
+        if inverse is not None:
+            corners = np.array([[x0, y0, 1.0], [x1, y1, 1.0]]).T
+            mapped = inverse @ corners
+            mapped /= np.where(mapped[2] == 0, 1.0, mapped[2])
+            x0, y0 = mapped[0, 0], mapped[1, 0]
+            x1, y1 = mapped[0, 1], mapped[1, 1]
+        colour = _COLORS.get(rec.change_type, (255, 255, 255))
+        cv2.rectangle(
+            overlay,
+            (int(round(x0)), int(round(y0))),
+            (int(round(x1)), int(round(y1))),
+            colour,
+            2,
+        )
+    return overlay
+
+
 def records_to_dicts(records: list[DiffRecord]) -> list[dict]:
     out = []
     for rec in records:

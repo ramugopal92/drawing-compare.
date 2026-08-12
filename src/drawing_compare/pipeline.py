@@ -29,7 +29,7 @@ from .diff_engine import DiffRecord, diff_pages
 from .classify import classify_records, summarize_by_severity
 from .page_matcher import MatchPlan, PagePair, match_pages
 from .pdf_io import PageData, load_pdf_page, scan_pdf_pages
-from .report import render_overlay, save_html, save_json
+from .report import render_new_overlay, render_overlay, save_html, save_json
 from .structured_report import save_structured_json, save_structured_report
 
 
@@ -40,6 +40,9 @@ class CompareResult:
     alignment: AlignmentResult
     records: list[DiffRecord]
     overlay_image: np.ndarray
+    # The same change boxes drawn on the new sheet, so a reviewer can put
+    # the two revisions side by side and see what replaced what.
+    new_overlay_image: np.ndarray | None = None
 
     def to_json(self, path: str | Path) -> None:
         save_json(
@@ -91,6 +94,9 @@ def compare_drawings(
     alignment = compute_alignment(old_page.raster_image, new_page.raster_image)
     records = diff_pages(old_page, new_page, alignment)
     overlay = render_overlay(old_page.raster_image, records, dpi=old_page.render_dpi)
+    new_overlay = render_new_overlay(
+        new_page.raster_image, records, alignment, dpi=new_page.render_dpi
+    )
 
     return CompareResult(
         old_page=old_page,
@@ -98,6 +104,7 @@ def compare_drawings(
         alignment=alignment,
         records=records,
         overlay_image=overlay,
+        new_overlay_image=new_overlay,
     )
 
 
@@ -142,6 +149,7 @@ class DocumentCompareResult:
     new_page_count: int = 0
     match_mode: str = "auto"
     title_block: object | None = None
+    old_title_block: object | None = None
 
     @property
     def total_records(self) -> int:
@@ -226,6 +234,56 @@ class DocumentCompareResult:
             if identity and identity.label():
                 return identity.label()
         return None
+
+    def revision_summary(self) -> dict[str, str | None]:
+        """
+        The header an engineer expects on a comparison: which drawing, from
+        which revision to which, and what the revision block says changed.
+
+        The description is taken from the revision table's own new row —
+        the drafter's own words — rather than being synthesised from the
+        detected differences, so the two can be read against each other.
+        """
+        from .classify import classify_records
+
+        from .classify import _REVISION_DESCRIPTION_RE
+
+        # The revision block holds a date, initials, an EC number and the
+        # description. Only the description is prose, so it is selected by
+        # wording rather than by being the longest field — otherwise a date
+        # or an approver's initials wins.
+        description = None
+        for page in self.pages:
+            if not page.result:
+                continue
+            for change in classify_records(page.result.records):
+                in_revision_block = (
+                    change.record.region == "revision_table"
+                    or change.component.value == "Revision table"
+                )
+                candidate = change.display_new or change.record.new_value
+                if not candidate:
+                    continue
+                looks_like_description = _REVISION_DESCRIPTION_RE.search(candidate)
+                if not (in_revision_block or looks_like_description):
+                    continue
+                if not looks_like_description and not any(
+                    ch.isalpha() for ch in candidate
+                ):
+                    continue
+                if looks_like_description and (
+                    description is None
+                    or not _REVISION_DESCRIPTION_RE.search(description)
+                    or len(candidate) > len(description)
+                ):
+                    description = candidate
+        return {
+            "drawing_number": getattr(self.title_block, "drawing_number", None),
+            "title": getattr(self.title_block, "title", None),
+            "previous_revision": getattr(self.old_title_block, "revision", None),
+            "current_revision": getattr(self.title_block, "revision", None),
+            "revision_description": description,
+        }
 
     def view_changes(self) -> tuple[list[str], list[str]]:
         """Views added and removed across the whole set."""
@@ -328,24 +386,33 @@ def compare_documents(
         except Exception as exc:  # one bad sheet shouldn't sink the set
             comparisons.append(PageComparison(pair=pair, error=f"{type(exc).__name__}: {exc}"))
 
-    title_block = None
-    try:
+    def read_title_block(pdf_path):
+        """Title-block fields from a document's first sheet.
+
+        Cells, not grouped lines: grouping merges a title-block label with
+        the value beside it, leaving the label-anchored lookup nothing to
+        anchor to. Read for BOTH revisions so the report can state which
+        revision went to which."""
         from .diff_engine import group_text_cells, group_text_lines
         from .layout import analyse_sheet, extract_title_block_fields
         from .pdf_io import load_pdf_page
 
-        first = load_pdf_page(new_pdf, 0)
-        # Raw spans, not grouped lines: grouping merges a title-block label
-        # with the value beside it, and the label-anchored lookup then has
-        # nothing to anchor to.
+        first = load_pdf_page(pdf_path, 0)
         lines = group_text_lines(first)
-        title_block = extract_title_block_fields(
+        return extract_title_block_fields(
             group_text_cells(first),
             analyse_sheet(lines, first.page_size_pt),
             lines=lines,
         )
+
+    try:
+        title_block = read_title_block(new_pdf)
     except Exception:
         title_block = None
+    try:
+        old_title_block = read_title_block(old_pdf)
+    except Exception:
+        old_title_block = None
 
     return DocumentCompareResult(
         old_pdf=old_pdf,
@@ -356,4 +423,5 @@ def compare_documents(
         new_page_count=len(new_summaries),
         match_mode=match_mode,
         title_block=title_block,
+        old_title_block=old_title_block,
     )
