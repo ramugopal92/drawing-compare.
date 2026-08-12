@@ -116,3 +116,56 @@ def test_trailing_revision_letter_is_split_off():
 def test_doubled_render_is_collapsed():
     lines = [span("TITLE", 800.0, 700.0), span("WWLLDD,, GGDDRR", 800.0, 714.0)]
     assert extract_title_block_fields(lines).title == "WLD, GDR"
+
+
+# ------------------------------------------------- revision block
+
+
+def revision_row(letter: str, description: str, y: float) -> list[TextSpan]:
+    """A revision row as drawn: the letter far left, the description in its
+    own column well to the right of it."""
+    return [
+        span(letter, 49.0, y, 10.0),
+        span(description, 194.0, y),
+        span("2018-04-20", 524.0, y),
+    ]
+
+
+def test_revision_letter_and_description_read_from_the_block():
+    from drawing_compare.layout import extract_revision_info
+
+    cells = revision_row("A", "INITIAL RELEASE", 726.0)
+    info = extract_revision_info(cells)
+    assert info.revision == "A"
+    assert info.description == "INITIAL RELEASE"
+
+
+def test_shadow_rendered_revision_block_is_repaired():
+    """Some templates draw title-block text twice, offset slightly, so every
+    character arrives doubled — including the revision letter, which is too
+    short for the general un-doubling rules to be confident about."""
+    from drawing_compare.layout import extract_revision_info
+
+    cells = revision_row("AA", "IINNIITTIIAALL RREELLEEAASSEE", 726.0)
+    info = extract_revision_info(cells)
+    assert info.revision == "A"
+    assert info.description == "INITIAL RELEASE"
+
+
+def test_description_preferred_over_dates_and_initials():
+    """A revision block holds a date, an EC number and approver initials
+    alongside the description. Only the description is prose."""
+    from drawing_compare.layout import extract_revision_info
+
+    cells = revision_row("B", "BAR WAS 5/8, ADDED DUAL DIMENSIONS", 726.0)
+    cells.append(span("451994", 431.0, 726.0))
+    cells.append(span("BE", 492.0, 726.0))
+    info = extract_revision_info(cells)
+    assert "BAR WAS" in info.description
+
+
+def test_title_block_revision_wins_when_available():
+    from drawing_compare.layout import extract_revision_info
+
+    cells = revision_row("A", "INITIAL RELEASE", 726.0)
+    assert extract_revision_info(cells, None, "C").revision == "C"

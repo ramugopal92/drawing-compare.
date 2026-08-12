@@ -424,24 +424,53 @@ def _undouble_text(text: str) -> str:
     """Collapse text that the exporter drew twice, character by character.
 
     Some templates render title-block text with a shadow copy offset by a
-    fraction of a point, which arrives as "WWLDLD" rather than "WLD"."""
+    fraction of a point, which arrives as "IINNIITTIIAALL RREELLEEAASSEE".
+    Words are un-doubled individually first so the spaces between them
+    survive; only if that fails is the whole string treated as one
+    interleaved sequence, which is the form some exporters produce when the
+    shadow copy crosses word boundaries.
+    """
+
     def fix(word: str) -> str:
         if len(word) < 4 or len(word) % 2:
             return word
         return word[::2] if all(word[i] == word[i + 1] for i in range(0, len(word), 2)) else word
 
-    # The shadow copy can interleave across word boundaries, giving
-    # "WWLDLD,G,GDDRR" — so try the whole string as one doubled sequence
-    # before falling back to fixing word by word.
+    def fix_runs(word: str) -> str:
+        """Collapse doubled letter-runs inside an otherwise normal word.
+
+        Partial shadowing produces "WAASSHHEERR" — only some characters
+        doubled — which the all-or-nothing test above leaves untouched."""
+        if len(word) < 6 or not word.isalpha():
+            return word
+        out, index = [], 0
+        collapsed = 0
+        while index < len(word):
+            if index + 1 < len(word) and word[index] == word[index + 1]:
+                out.append(word[index])
+                index += 2
+                collapsed += 1
+            else:
+                out.append(word[index])
+                index += 1
+        return "".join(out) if collapsed >= 2 else word
+
+    words = text.split(" ")
+    fixed = [fix(w) for w in words]
+    changed = sum(1 for a, b in zip(words, fixed) if a != b)
+    if changed >= max(1, len([w for w in words if len(w) >= 4]) // 2):
+        return " ".join(fixed)
+
+    run_fixed = [fix_runs(w) for w in words]
+    if sum(1 for a, b in zip(words, run_fixed) if a != b) >= 1:
+        return " ".join(run_fixed)
+
     stripped = text.replace(" ", "")
     if len(stripped) >= 8 and len(stripped) % 2 == 0:
         if all(stripped[i] == stripped[i + 1] for i in range(0, len(stripped), 2)):
             return _respace(stripped[::2])
 
-    words = text.split(" ")
-    fixed = [fix(w) for w in words]
-    changed = sum(1 for a, b in zip(words, fixed) if a != b)
-    return " ".join(fixed) if changed >= max(1, len(words) // 2) else text
+    return text
 
 
 def _respace(text: str) -> str:
@@ -650,3 +679,111 @@ def _best_drawing_number(cells: list[TextSpan]) -> str | None:
     # A drawing number is repeated on every sheet of the set — in the title
     # block and often in a corner stamp — so frequency is good evidence.
     return max(seen.items(), key=lambda item: (item[1], len(item[0])))[0]
+
+
+# --- revision block ------------------------------------------------------
+
+# The description text of a revision row. A revision block also holds a
+# date, an EC number and approver initials, so the description is picked by
+# wording rather than by being the longest cell — otherwise a date wins.
+_REVISION_DESCRIPTION_RE = re.compile(
+    r"\bINITIAL\s+RELEASE\b"
+    r"|\bWAS\b"
+    r"|\bADDED\b|\bREMOVED\b|\bREVISED\b|\bUPDATED\b|\bRE-?ISSUED?\b|\bREDRAWN\b"
+    r"|\bCHANGED\b|\bCORRECTED\b|\bDELETED\b",
+    re.IGNORECASE,
+)
+
+
+def _revision_letter(text: str) -> str:
+    """Normalise a revision-letter cell.
+
+    Shadow-rendered text doubles every character, so revision "A" arrives
+    as "AA" — too short for the general un-doubling rules, which need
+    length to be confident a repeat is not genuine.
+    """
+    value = text.strip().upper()
+    if len(value) == 2 and value[0] == value[1]:
+        return value[0]
+    if len(value) == 4 and value[0] == value[1] and value[2] == value[3]:
+        return value[0] + value[2]
+    return value
+
+
+@dataclass
+class RevisionInfo:
+    """The current revision of one document, and what its block says."""
+
+    revision: str | None = None
+    description: str | None = None
+
+
+def extract_revision_info(
+    cells: list[TextSpan],
+    layout: SheetLayout | None = None,
+    title_block_revision: str | None = None,
+) -> RevisionInfo:
+    """
+    Read a document's own current revision letter and description.
+
+    Taken from each document independently rather than from the diff between
+    them: a comparison shows what moved, but the report needs to state what
+    each revision *is* — "A: INITIAL RELEASE" against "B: BAR WAS Ø5/8" —
+    and the old side's description never appears as an added value, so it
+    cannot be recovered from the difference list at all.
+    """
+    # The whole sheet is searched, not just the detected revision region.
+    # A revision table spans the full width of the sheet — the description
+    # column sits far to the left of the EC-ID and approval columns that
+    # carry its header labels — so a region grown from those labels
+    # routinely excludes the description itself. The wording is decisive on
+    # its own, so region is used only to break ties.
+    candidates = cells
+    region = None
+    if layout is not None:
+        region = next(
+            (r for r in layout.regions if r.name == REVISION_TABLE), None
+        )
+
+    description = None
+    description_cell = None
+    description_in_region = False
+    for cell in candidates:
+        # Some templates draw title-block text twice, offset by a fraction
+        # of a point, so it arrives as "IINNIITTIIAALL RREELLEEAASSEE".
+        text = _undouble_text(cell.text.strip())
+        if len(text) < 4 or not _REVISION_DESCRIPTION_RE.search(text):
+            continue
+        # Prefer the longest qualifying description: revision blocks are
+        # read bottom-up and the most recent row is usually the fullest.
+        in_region = region.contains(cell.bbox) if region is not None else False
+        better = (
+            description is None
+            or (in_region and not description_in_region)
+            or (in_region == description_in_region and len(text) > len(description))
+        )
+        if better:
+            description = text
+            description_cell = cell
+            description_in_region = in_region
+
+    revision = title_block_revision
+
+    # A revision row begins with its own letter. When the title block did
+    # not yield one, take the lone letter printed to the left of the
+    # description on the same baseline.
+    if revision is None and description_cell is not None:
+        height = max(description_cell.bbox[3] - description_cell.bbox[1], 6.0)
+        row = [
+            cell
+            for cell in cells
+            if cell is not description_cell
+            and abs(cell.bbox[1] - description_cell.bbox[1]) <= height * 0.8
+            and cell.bbox[2] <= description_cell.bbox[0] + 4
+            and description_cell.bbox[0] - cell.bbox[2] <= 220.0
+            and re.fullmatch(r"[A-Z]\d?", _revision_letter(cell.text))
+        ]
+        if row:
+            revision = _revision_letter(max(row, key=lambda c: c.bbox[0]).text)
+
+    return RevisionInfo(revision=revision, description=description)

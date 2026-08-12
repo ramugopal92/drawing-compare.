@@ -150,6 +150,8 @@ class DocumentCompareResult:
     match_mode: str = "auto"
     title_block: object | None = None
     old_title_block: object | None = None
+    old_revision: object | None = None
+    new_revision: object | None = None
 
     @property
     def total_records(self) -> int:
@@ -237,52 +239,20 @@ class DocumentCompareResult:
 
     def revision_summary(self) -> dict[str, str | None]:
         """
-        The header an engineer expects on a comparison: which drawing, from
-        which revision to which, and what the revision block says changed.
+        Drawing identity and both revisions, side by side.
 
-        The description is taken from the revision table's own new row —
-        the drafter's own words — rather than being synthesised from the
-        detected differences, so the two can be read against each other.
+        Each side is read from its own document rather than from the diff:
+        the old revision's description never appears as an added value, so
+        it cannot be recovered from a difference list at all.
         """
-        from .classify import classify_records
-
-        from .classify import _REVISION_DESCRIPTION_RE
-
-        # The revision block holds a date, initials, an EC number and the
-        # description. Only the description is prose, so it is selected by
-        # wording rather than by being the longest field — otherwise a date
-        # or an approver's initials wins.
-        description = None
-        for page in self.pages:
-            if not page.result:
-                continue
-            for change in classify_records(page.result.records):
-                in_revision_block = (
-                    change.record.region == "revision_table"
-                    or change.component.value == "Revision table"
-                )
-                candidate = change.display_new or change.record.new_value
-                if not candidate:
-                    continue
-                looks_like_description = _REVISION_DESCRIPTION_RE.search(candidate)
-                if not (in_revision_block or looks_like_description):
-                    continue
-                if not looks_like_description and not any(
-                    ch.isalpha() for ch in candidate
-                ):
-                    continue
-                if looks_like_description and (
-                    description is None
-                    or not _REVISION_DESCRIPTION_RE.search(description)
-                    or len(candidate) > len(description)
-                ):
-                    description = candidate
         return {
             "drawing_number": getattr(self.title_block, "drawing_number", None),
+            "old_drawing_number": getattr(self.old_title_block, "drawing_number", None),
             "title": getattr(self.title_block, "title", None),
-            "previous_revision": getattr(self.old_title_block, "revision", None),
-            "current_revision": getattr(self.title_block, "revision", None),
-            "revision_description": description,
+            "previous_revision": getattr(self.old_revision, "revision", None),
+            "current_revision": getattr(self.new_revision, "revision", None),
+            "previous_description": getattr(self.old_revision, "description", None),
+            "current_description": getattr(self.new_revision, "description", None),
         }
 
     def view_changes(self) -> tuple[list[str], list[str]]:
@@ -397,22 +367,24 @@ def compare_documents(
         from .layout import analyse_sheet, extract_title_block_fields
         from .pdf_io import load_pdf_page
 
+        from .layout import extract_revision_info
+
         first = load_pdf_page(pdf_path, 0)
         lines = group_text_lines(first)
-        return extract_title_block_fields(
-            group_text_cells(first),
-            analyse_sheet(lines, first.page_size_pt),
-            lines=lines,
-        )
+        cells = group_text_cells(first)
+        sheet_layout = analyse_sheet(cells, first.page_size_pt)
+        fields = extract_title_block_fields(cells, sheet_layout, lines=lines)
+        revision = extract_revision_info(cells, sheet_layout, fields.revision)
+        return fields, revision
 
     try:
-        title_block = read_title_block(new_pdf)
+        title_block, new_revision = read_title_block(new_pdf)
     except Exception:
-        title_block = None
+        title_block, new_revision = None, None
     try:
-        old_title_block = read_title_block(old_pdf)
+        old_title_block, old_revision = read_title_block(old_pdf)
     except Exception:
-        old_title_block = None
+        old_title_block, old_revision = None, None
 
     return DocumentCompareResult(
         old_pdf=old_pdf,
@@ -424,4 +396,6 @@ def compare_documents(
         match_mode=match_mode,
         title_block=title_block,
         old_title_block=old_title_block,
+        old_revision=old_revision,
+        new_revision=new_revision,
     )

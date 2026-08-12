@@ -156,17 +156,36 @@ st.markdown("---")
 revision = doc.revision_summary()
 if any(revision.values()):
     st.subheader("Revision summary")
-    r1, r2, r3 = st.columns([2, 1, 1])
-    r1.metric("Drawing", revision.get("drawing_number") or "—")
-    r2.metric("Previous revision", revision.get("previous_revision") or "—")
-    r3.metric("Current revision", revision.get("current_revision") or "—")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "": "Drawing number",
+                    "Baseline (old)": revision.get("old_drawing_number")
+                    or revision.get("drawing_number") or "—",
+                    "Compared (new)": revision.get("drawing_number") or "—",
+                },
+                {
+                    "": "Revision",
+                    "Baseline (old)": revision.get("previous_revision") or "—",
+                    "Compared (new)": revision.get("current_revision") or "—",
+                },
+                {
+                    "": "Description",
+                    "Baseline (old)": revision.get("previous_description") or "—",
+                    "Compared (new)": revision.get("current_description") or "—",
+                },
+            ]
+        ),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Baseline (old)": st.column_config.TextColumn(width="large"),
+            "Compared (new)": st.column_config.TextColumn(width="large"),
+        },
+    )
     if revision.get("title"):
         st.caption(revision["title"])
-    if revision.get("revision_description"):
-        st.info(
-            f"Revision block states: **{revision['revision_description']}**  \n"
-            "The findings below are what the comparison detected independently."
-        )
 
 st.subheader("Findings")
 
@@ -339,4 +358,10 @@ st.caption(
     f"Report includes SHA-256 digests of both files "
     f"({prov.old_file.short_hash} / {prov.new_file.short_hash}), the settings used, "
     "and a sign-off block."
+)
+
+st.markdown("---")
+st.markdown(
+    "**Ramu Gopal** — CAD Automation | AI Systems Developer  \n"
+    "[thetechthinker.com](https://thetechthinker.com/ramu-gopal/)"
 )

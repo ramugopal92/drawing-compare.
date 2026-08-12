@@ -216,13 +216,11 @@ def _executive_summary(all_changes: list[ClassifiedChange], plan_summary: str) -
 
 def _revision_summary_section(doc_result) -> str:
     """
-    Drawing identity and revision movement, stated once at the top.
+    Drawing identity and both revisions in one comparison table.
 
-    A reviewer opening a comparison asks the same four questions first:
-    which drawing, from which revision, to which, and what does the
-    revision block claim changed. Answering them before any difference
-    list means the detail that follows can be read against the drafter's
-    own stated intent.
+    Laid out the way a revision block is read — a row per field, a column
+    per revision — so the movement is visible at a glance rather than
+    having to be assembled from two separate statements.
     """
     try:
         summary = doc_result.revision_summary()
@@ -231,21 +229,35 @@ def _revision_summary_section(doc_result) -> str:
     if not any(summary.values()):
         return ""
 
+    old_number = summary.get("old_drawing_number") or summary.get("drawing_number")
     rows = [
-        ("Drawing number", summary.get("drawing_number")),
-        ("Title", summary.get("title")),
-        ("Previous revision", summary.get("previous_revision")),
-        ("Current revision", summary.get("current_revision")),
-        ("Revision description", summary.get("revision_description")),
+        ("Drawing number", old_number, summary.get("drawing_number")),
+        ("Revision", summary.get("previous_revision"), summary.get("current_revision")),
+        (
+            "Description",
+            summary.get("previous_description"),
+            summary.get("current_description"),
+        ),
     ]
     body = "".join(
-        f"<tr><th style='width:24%'>{_esc(label)}</th><td>{_esc(value or '—')}</td></tr>"
-        for label, value in rows
+        f"<tr><th style='width:20%'>{_esc(label)}</th>"
+        f"<td style='width:40%'>{_esc(before or '—')}</td>"
+        f"<td>{_esc(after or '—')}</td></tr>"
+        for label, before, after in rows
+    )
+    title = summary.get("title")
+    caption = (
+        f'<p class="sub" style="margin:6px 0 0">{_esc(title)}</p>' if title else ""
     )
     return f"""
     <h2>Revision summary</h2>
-    <table>{body}</table>
-    <p class="sub" style="margin-top:6px">The description above is the
+    <table>
+      <thead><tr><th></th><th>Baseline revision (old)</th>
+      <th>Compared revision (new)</th></tr></thead>
+      <tbody>{body}</tbody>
+    </table>
+    {caption}
+    <p class="sub" style="margin-top:6px">Descriptions above are the
     drafter's own revision-block wording. The findings below are what the
     comparison detected independently; read them against each other.</p>"""
 
