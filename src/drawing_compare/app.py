@@ -252,7 +252,8 @@ else:
                         [
                             {
                                 "Severity": c.severity.value,
-                                "Category": c.category.value,
+                                "Component": c.component.value,
+                                "Significance": c.category.value,
                                 # View or region, not the bare zone code — "Detail
                                 # A-A" is something a reviewer can act on; "C4" on
                                 # its own means opening the drawing to find out.

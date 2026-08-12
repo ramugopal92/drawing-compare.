@@ -208,9 +208,33 @@ def _executive_summary(all_changes: list[ClassifiedChange], plan_summary: str) -
     <div class="cards">{cards}</div>
     {verdict}
     <p class="sub" style="margin:10px 0 0">Sheet pairing: {_esc(plan_summary)}</p>
-    <h3>Changes by category</h3>
+    {_component_summary(all_changes)}
+    <h3>Changes by significance</h3>
     <table><thead><tr><th>Category</th><th style="width:90px">Count</th></tr></thead>
     <tbody>{cat_rows}</tbody></table>"""
+
+
+def _component_summary(all_changes: list[ClassifiedChange]) -> str:
+    """
+    What changed, broken down by drawing component.
+
+    This is the view an engineer scans first: not "37 dimensions changed"
+    but which parts of the drawing were touched at all — parts list, weld
+    symbols, section views, title block.
+    """
+    counts: dict[str, int] = {}
+    for change in all_changes:
+        counts[change.component.value] = counts.get(change.component.value, 0) + 1
+    if not counts:
+        return ""
+    rows = "".join(
+        f"<tr><td>{_esc(name)}</td><td class='num'>{count}</td></tr>"
+        for name, count in sorted(counts.items(), key=lambda kv: -kv[1])
+    )
+    return f"""
+    <h3>Changes by drawing component</h3>
+    <table><thead><tr><th>Component</th><th style="width:90px">Count</th></tr></thead>
+    <tbody>{rows}</tbody></table>"""
 
 
 def _critical_section(items: list[tuple[str, ClassifiedChange]]) -> str:
@@ -227,8 +251,9 @@ def _critical_section(items: list[tuple[str, ClassifiedChange]]) -> str:
     <p class="sub" style="margin-bottom:6px">Changes that alter the part as made or
     bought — materials, specifications, part numbers, quantities, dimensions and
     tolerances.</p>
-    <table><thead><tr><th style="width:36px">#</th><th>Sheet</th><th style="width:170px">Where</th>
-    <th style="width:150px">Category</th><th>Was</th><th>Is now</th></tr></thead>
+    <table><thead><tr><th style="width:36px">#</th><th>Sheet</th><th style="width:150px">Where</th>
+    <th style="width:150px">Component</th><th style="width:130px">Significance</th>
+    <th>Was</th><th>Is now</th></tr></thead>
     <tbody>{rows}</tbody></table>"""
 
 
@@ -242,12 +267,13 @@ def _change_table(classified: list[ClassifiedChange]) -> str:
             last = c.severity
             count = sum(1 for x in classified if x.severity is c.severity)
             rows.append(
-                f'<tr><td colspan="6" style="background:{SEVERITY_TINT[c.severity]};'
+                f'<tr><td colspan="7" style="background:{SEVERITY_TINT[c.severity]};'
                 f"border-left:3px solid {SEVERITY_COLOUR[c.severity]};font-weight:600;"
                 f'color:{SEVERITY_COLOUR[c.severity]}">{c.severity.value} — {count} change(s)</td></tr>'
             )
         rows.append(
-            f"<tr><td>{n}</td><td>{_esc(_where(c))}</td><td>{_esc(c.category.value)}</td>"
+            f"<tr><td>{n}</td><td>{_esc(_where(c))}</td>"
+            f"<td>{_esc(c.component.value)}</td><td>{_esc(c.category.value)}</td>"
             f"<td>{_esc(c.display_old or c.record.old_value or '—')}</td>"
             f"<td>{_esc(c.display_new or c.record.new_value or '—')}</td>"
             f"<td class='mono' style='font-size:10.5px;color:var(--muted)'>"

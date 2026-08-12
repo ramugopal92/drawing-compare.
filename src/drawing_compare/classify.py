@@ -27,6 +27,12 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .diff_engine import ChangeType, DiffRecord
+from .taxonomy import (
+    DIMENSION_COMPONENTS,
+    VIEW_COMPONENTS,
+    Component,
+    component_of_pair,
+)
 
 
 class Severity(str, Enum):
@@ -239,6 +245,11 @@ class ClassifiedChange:
     rationale: str
     display_old: str | None = None
     display_new: str | None = None
+    # The drawing component this change affects — "Diameter dimension",
+    # "Weld symbol", "Section view". The category says how significant a
+    # change is; the component says what part of the drawing it is, which
+    # is what an engineer needs in order to go and check it.
+    component: Component = Component.UNCLASSIFIED
 
     @property
     def zone(self) -> str:
@@ -465,6 +476,11 @@ def _make(
     display_old: str | None = None,
     display_new: str | None = None,
 ) -> ClassifiedChange:
+    component = component_of_pair(
+        display_old or record.old_value,
+        display_new or record.new_value,
+        record.region,
+    )
     return ClassifiedChange(
         record=record,
         category=category,
@@ -472,6 +488,7 @@ def _make(
         rationale=rationale,
         display_old=display_old,
         display_new=display_new,
+        component=component,
     )
 
 
